@@ -13,8 +13,8 @@ const execAsync = promisify(exec);
 async function ps(script: string): Promise<string> {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   const { stdout, stderr } = await execAsync(
-    `powershell -NonInteractive -EncodedCommand ${encoded}`,
-    { maxBuffer: 50 * 1024 * 1024 } // 50 MB for screenshots
+    `powershell -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`,
+    { maxBuffer: 50 * 1024 * 1024, windowsHide: true }
   );
   if (stderr) process.stderr.write(stderr);
   return stdout.trim();
