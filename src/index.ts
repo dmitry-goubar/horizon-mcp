@@ -86,11 +86,13 @@ ${clicks}
 
 // Type text via SendKeys
 async function sendText(text: string): Promise<void> {
-  // SendKeys interprets +, ^, %, {, }, (, ) as special — escape them
-  const escaped = text.replace(/([+^%~(){}[\]])/g, "{$1}");
+  // Escape SendKeys special chars, then embed in a PS single-quoted string
+  // (single-quoted strings are fully literal in PowerShell — no $ or backtick expansion)
+  const sendKeysEscaped = text.replace(/([+^%~(){}[\]])/g, "{$1}");
+  const psLiteral = sendKeysEscaped.replace(/'/g, "''"); // ' → '' is the only escape needed
   await ps(`
 Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.SendKeys]::SendWait("${escaped.replace(/"/g, '`"')}")
+[System.Windows.Forms.SendKeys]::SendWait('${psLiteral}')
 `);
 }
 
@@ -119,7 +121,8 @@ async function pressKey(key: string): Promise<void> {
     "Ctrl+Z": "^z", "Ctrl+F": "^f", "Alt+F4": "%{F4}",
     "Win": "^{ESC}",
   };
-  const sendKey = keyMap[key] ?? `{${key}}`;
+  const sendKey = keyMap[key];
+  if (!sendKey) throw new Error(`Unsupported key: "${key}"`);
   await ps(`
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.SendKeys]::SendWait("${sendKey}")
@@ -138,9 +141,11 @@ Get-Process | Where-Object { $_.MainWindowTitle -ne "" } |
 // Bring a window to the foreground by PID or partial title
 async function focusWindow(pidOrTitle: string): Promise<string> {
   const isNumeric = /^\d+$/.test(pidOrTitle.trim());
+  // Embed title in a PS single-quoted string — escape ' as '' (no other escaping needed)
+  const safeTitle = pidOrTitle.replace(/'/g, "''");
   const selector = isNumeric
     ? `Where-Object { $_.Id -eq ${pidOrTitle} }`
-    : `Where-Object { $_.MainWindowTitle -like "*${pidOrTitle}*" }`;
+    : `Where-Object { $_.MainWindowTitle -like '*${safeTitle}*' }`;
 
   return ps(`
 Add-Type @"
