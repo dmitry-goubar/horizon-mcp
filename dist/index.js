@@ -146,6 +146,82 @@ if ($p) {
 } else { "Window not found: ${pidOrTitle}" }
 `);
 }
+// Return the currently focused window (title + PID)
+async function getForegroundWindow() {
+    return ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices; using System.Text;
+public class FgWin {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+}
+"@
+$h = [FgWin]::GetForegroundWindow()
+$sb = New-Object System.Text.StringBuilder(256)
+[FgWin]::GetWindowText($h, $sb, 256) | Out-Null
+$pid_ = [uint32]0
+[FgWin]::GetWindowThreadProcessId($h, [ref]$pid_) | Out-Null
+ConvertTo-Json -Compress @{ Title = $sb.ToString(); Pid = [int]$pid_ }
+`);
+}
+// Capture a rectangular region of the screen, returns base64 PNG
+async function screenshotRegion(x, y, width, height) {
+    return ps(`
+Add-Type -AssemblyName System.Drawing
+$bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen(${x}, ${y}, 0, 0, $bmp.Size)
+$ms = New-Object System.IO.MemoryStream
+$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$gfx.Dispose(); $bmp.Dispose()
+[Convert]::ToBase64String($ms.ToArray())
+`);
+}
+// Sample the color of a single pixel
+async function getPixelColor(x, y) {
+    return ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class PixelUtil {
+  [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr h);
+  [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h, IntPtr dc);
+  [DllImport("gdi32.dll")] public static extern uint GetPixel(IntPtr dc, int x, int y);
+}
+"@
+$dc = [PixelUtil]::GetDC([IntPtr]::Zero)
+$c = [PixelUtil]::GetPixel($dc, ${x}, ${y})
+[PixelUtil]::ReleaseDC([IntPtr]::Zero, $dc) | Out-Null
+$r = [int]($c -band 0xFF)
+$g = [int](($c -shr 8) -band 0xFF)
+$b = [int](($c -shr 16) -band 0xFF)
+ConvertTo-Json -Compress @{ R = $r; G = $g; B = $b; Hex = ("#{0:X2}{1:X2}{2:X2}" -f $r,$g,$b) }
+`);
+}
+// Scroll the mouse wheel at (x, y)
+async function scroll(x, y, direction, amount) {
+    const delta = direction === "up" ? amount * 120 : -(amount * 120);
+    await ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class ScrollUtil {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);
+}
+"@
+[ScrollUtil]::SetCursorPos(${x}, ${y}); Start-Sleep -Milliseconds 50
+[ScrollUtil]::mouse_event(0x0800, 0, 0, ${delta}, 0)
+`);
+}
+// Read the current clipboard text
+async function getClipboard() {
+    return ps(`Get-Clipboard`);
+}
+// Write text to the clipboard
+async function setClipboard(text) {
+    const safeText = text.replace(/'/g, "''");
+    await ps(`Set-Clipboard -Value '${safeText}'`);
+}
 // --- MCP Server setup ---
 const server = new Server({ name: "horizon-mcp", version: "1.0.0" }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -234,6 +310,67 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                 required: ["target"],
             },
         },
+        {
+            name: "get_foreground_window",
+            description: "Return the title and PID of the window that currently has keyboard focus as JSON {Title, Pid}.",
+            inputSchema: { type: "object", properties: {}, required: [] },
+        },
+        {
+            name: "screenshot_region",
+            description: "Capture a rectangular region of the screen and return it as a PNG image. Useful for cropping to just the chat area to reduce Vision API token cost.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    x: { type: "number", description: "Left edge pixel coordinate" },
+                    y: { type: "number", description: "Top edge pixel coordinate" },
+                    width: { type: "number", description: "Width in pixels" },
+                    height: { type: "number", description: "Height in pixels" },
+                },
+                required: ["x", "y", "width", "height"],
+            },
+        },
+        {
+            name: "get_pixel_color",
+            description: "Return the color of a single screen pixel as JSON {R, G, B, Hex}. Use to cheaply detect notification dots or UI state changes at known coordinates.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    x: { type: "number", description: "Horizontal pixel coordinate" },
+                    y: { type: "number", description: "Vertical pixel coordinate" },
+                },
+                required: ["x", "y"],
+            },
+        },
+        {
+            name: "scroll",
+            description: "Scroll the mouse wheel at (x, y). Use to scroll through chat history.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    x: { type: "number", description: "Horizontal pixel coordinate to scroll at" },
+                    y: { type: "number", description: "Vertical pixel coordinate to scroll at" },
+                    direction: { type: "string", enum: ["up", "down"], description: "Scroll direction" },
+                    amount: { type: "number", description: "Number of notches to scroll (default: 3)" },
+                },
+                required: ["x", "y", "direction"],
+            },
+        },
+        {
+            name: "get_clipboard",
+            description: "Return the current clipboard text content.",
+            inputSchema: { type: "object", properties: {}, required: [] },
+        },
+        {
+            name: "set_clipboard",
+            description: "Write text to the clipboard. Useful for staging a reply that the user can paste into the remote desktop with Ctrl+V.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    text: { type: "string", description: "Text to place on the clipboard" },
+                },
+                required: ["text"],
+            },
+        },
     ],
 }));
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -273,6 +410,31 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             case "focus_window": {
                 const result = await focusWindow(String(a.target));
                 return { content: [{ type: "text", text: result }] };
+            }
+            case "get_foreground_window": {
+                const result = await getForegroundWindow();
+                return { content: [{ type: "text", text: result }] };
+            }
+            case "screenshot_region": {
+                const data = await screenshotRegion(Number(a.x), Number(a.y), Number(a.width), Number(a.height));
+                return { content: [{ type: "image", data, mimeType: "image/png" }] };
+            }
+            case "get_pixel_color": {
+                const result = await getPixelColor(Number(a.x), Number(a.y));
+                return { content: [{ type: "text", text: result }] };
+            }
+            case "scroll": {
+                const amount = a.amount !== undefined ? Number(a.amount) : 3;
+                await scroll(Number(a.x), Number(a.y), a.direction, amount);
+                return { content: [{ type: "text", text: `Scrolled ${a.direction} ${amount} notch(es) at (${a.x}, ${a.y})` }] };
+            }
+            case "get_clipboard": {
+                const result = await getClipboard();
+                return { content: [{ type: "text", text: result }] };
+            }
+            case "set_clipboard": {
+                await setClipboard(String(a.text));
+                return { content: [{ type: "text", text: "Clipboard updated" }] };
             }
             default:
                 return {
