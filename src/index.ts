@@ -246,6 +246,61 @@ async function setClipboard(text: string): Promise<void> {
   await ps(`Set-Clipboard -Value '${safeText}'`);
 }
 
+// Extract text from the screen (or a region) using Windows built-in WinRT OCR.
+// Returns JSON { text: string, lines: string[] }.
+// Uses a temp PNG file to bridge System.Drawing and the WinRT BitmapDecoder.
+async function runOcr(x?: number, y?: number, width?: number, height?: number): Promise<string> {
+  const hasRegion = x !== undefined && y !== undefined && width !== undefined && height !== undefined;
+
+  const captureScript = hasRegion
+    ? `$bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen(${x}, ${y}, 0, 0, $bmp.Size)
+$gfx.Dispose()`
+    : `$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+$gfx.Dispose()`;
+
+  return ps(`
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+[void][Windows.Media.Ocr.OcrEngine,            Windows.Foundation, ContentType=WindowsRuntime]
+[void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime]
+[void][Windows.Storage.StorageFile,            Windows.Foundation, ContentType=WindowsRuntime]
+
+function Await([object]$Op) {
+    $iface = $Op.GetType().GetInterfaces() |
+             Where-Object { $_.IsGenericType -and $_.Name -eq 'IAsyncOperation\`1' } |
+             Select-Object -First 1
+    $m = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+          Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 } |
+          Select-Object -First 1).MakeGenericMethod($iface.GenericTypeArguments[0])
+    $m.Invoke($null, @($Op)).GetAwaiter().GetResult()
+}
+
+${captureScript}
+$tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString('N') + '.png')
+$bmp.Save($tmp); $bmp.Dispose()
+
+try {
+    $sf   = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($tmp))
+    $stm  = Await ($sf.OpenReadAsync())
+    $dec  = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stm))
+    $sbmp = Await ($dec.GetSoftwareBitmapAsync())
+    $eng  = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if (-not $eng) { throw 'No OCR engine available — install a language pack in Windows Settings' }
+    $res   = Await ($eng.RecognizeAsync($sbmp))
+    $lines = @($res.Lines | ForEach-Object { $_.Text })
+    ConvertTo-Json -Compress @{ text = $res.Text; lines = $lines }
+} finally {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+}
+`);
+}
+
 // --- MCP Server setup ---
 
 const server = new Server(
@@ -405,6 +460,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["text"],
       },
     },
+    {
+      name: "ocr",
+      description:
+        "Extract text from the screen using the Windows built-in OCR engine. Free, offline, no API cost. " +
+        "Returns JSON {text, lines[]}. Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region. " +
+        "Use as a cheap pre-filter before sending screenshots to Claude Vision — if OCR text is unchanged, skip the Vision call.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          x:      { type: "number", description: "Left edge of region (omit for full primary screen)" },
+          y:      { type: "number", description: "Top edge of region" },
+          width:  { type: "number", description: "Width of region in pixels" },
+          height: { type: "number", description: "Height of region in pixels" },
+        },
+        required: [],
+      },
+    },
   ],
 }));
 
@@ -478,6 +550,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "set_clipboard": {
         await setClipboard(String(a.text));
         return { content: [{ type: "text", text: "Clipboard updated" }] };
+      }
+      case "ocr": {
+        const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
+        const result = hasRegion
+          ? await runOcr(Number(a.x), Number(a.y), Number(a.width), Number(a.height))
+          : await runOcr();
+        return { content: [{ type: "text", text: result }] };
       }
       default:
         return {
