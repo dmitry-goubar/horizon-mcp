@@ -156,6 +156,60 @@ Extracts text from the screen using the Windows built-in OCR engine — free, of
 | `width` | number | no | |
 | `height` | number | no | |
 
+### `key_combo`
+Presses a keyboard chord using real virtual-key codes via `keybd_event`. Unlike `type_text`/`press_key` (SendKeys), this sends the **real Windows key** and **any modifier combination** — required to drive a remote Horizon session. List modifiers first, main key last.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `keys` | string[] | yes | Modifiers first, main key last, e.g. `["Win","R"]`, `["Ctrl","Alt","Insert"]`, `["Alt","Tab"]`. A `"Ctrl+V"` string is also accepted. |
+| `times` | number | no | Repeat main key while modifiers held (e.g. Alt+Tab ×3). Default 1. |
+| `holdMs` | number | no | Ms to hold the main key each press. Default 0. |
+
+Names: Ctrl, Alt, Shift, Win, Tab, Enter, Esc, Space, Backspace, Delete, Insert, Home, End, PageUp, PageDown, Up, Down, Left, Right, Apps, PrintScreen, A–Z, 0–9, F1–F24.
+
+### `paste_text`
+Puts text on the clipboard and pastes with Ctrl+V — more reliable than `type_text` for arbitrary characters and password fields in a remote session.
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `text` | string | yes |
+
+The value stays on the clipboard afterward; for secrets, follow with `set_clipboard ""` to clear it.
+
+### `move_mouse`
+Moves the cursor to `(x, y)` without clicking (hover for menus/tooltips).
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `x` | number | yes |
+| `y` | number | yes |
+
+### `mouse_drag`
+Presses at `(x1, y1)`, drags to `(x2, y2)` in steps, releases. Drag windows, select text, resize.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `x1` | number | yes | |
+| `y1` | number | yes | |
+| `x2` | number | yes | |
+| `y2` | number | yes | |
+| `button` | `"left"` \| `"right"` | no | Default `"left"` |
+
+### `wait`
+Pauses for `ms` milliseconds (max 60000). Let a laggy remote session catch up before the next screenshot.
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `ms` | number | yes |
+
+## Controlling a remote Horizon session
+
+The Horizon Client renders the remote desktop as **pixels inside one host window**. `list_windows`/`focus_window` see only **host** windows — they cannot enumerate or activate a window *inside* the remote session. Drive the remote by focusing the Horizon window, then sending input it forwards into the session. `key_combo`/`paste_text` exist because SendKeys cannot send the Win key or Ctrl+Alt+Del.
+
+- **Unlock remote VM:** `focus_window "Horizon"` → `key_combo ["Ctrl","Alt","Insert"]` → screenshot → click password field → `paste_text "<password>"` → `key_combo ["Enter"]` → `set_clipboard ""`. (Works for the remote VM only; the local host lock screen runs on Windows' secure desktop and cannot receive synthetic input.)
+- **Restore a minimized remote app:** `focus_window "Horizon"` → `key_combo ["Alt","Tab"]` (add `times`) or click its remote taskbar icon → screenshot.
+- **Launch a remote app:** `focus_window "Horizon"` → `key_combo ["Win","R"]` → `type_text "notepad"` → `key_combo ["Enter"]` → `wait 1500` → screenshot. (Or `double_click` a published-app icon in the Horizon launcher.)
+
 ## Typical workflow for Horizon Client automation
 
 ```
