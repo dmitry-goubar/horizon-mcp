@@ -8,7 +8,7 @@ Controlling a graphical Windows application from an AI assistant normally requir
 
 The primary use case is the Omnissa Horizon Client (formerly VMware Horizon), a remote desktop and published-application client used in enterprise environments. Many enterprise tools live inside Horizon sessions and have no external API. horizon-mcp lets Claude navigate those apps, read data from them, fill in forms, and open remote applications — all by observing the screen and driving the mouse and keyboard. The same tools work on any Windows application.
 
-This server exposes fourteen tools covering the full input/output surface of a desktop: screen capture (`screenshot`, `screenshot_region`, `get_pixel_color`), mouse control (`click`, `double_click`, `scroll`), keyboard input (`type_text`, `press_key`), window management (`list_windows`, `focus_window`, `get_foreground_window`), clipboard access (`get_clipboard`, `set_clipboard`), and on-device text extraction (`ocr`). It exposes no resources or prompts. Because Claude is multimodal, screenshot output is returned as a raw PNG image that Claude reads directly; the `ocr` tool is offered separately as a cheap, offline pre-filter that uses the Windows built-in OCR engine — no third-party library or API is required.
+This server exposes nineteen tools covering the full input/output surface of a desktop: screen capture (`screenshot`, `screenshot_region`, `get_pixel_color`), mouse control (`click`, `double_click`, `scroll`, `move_mouse`, `mouse_drag`), keyboard input (`type_text`, `press_key`, `key_combo`, `paste_text`), window management (`list_windows`, `focus_window`, `get_foreground_window`), clipboard access (`get_clipboard`, `set_clipboard`), on-device text extraction (`ocr`), and timing (`wait`). It exposes no resources or prompts. Because Claude is multimodal, screenshot output is returned as a raw PNG image that Claude reads directly; the `ocr` tool is offered separately as a cheap, offline pre-filter that uses the Windows built-in OCR engine — no third-party library or API is required.
 
 ## Installation
 
@@ -279,6 +279,124 @@ Returns: JSON object `{ "text": <string>, "lines": <string[]> }`. Requires an OC
 
 ---
 
+### `key_combo`
+
+Presses a keyboard chord using real virtual-key codes via `keybd_event`. Unlike `type_text` and `press_key` (which use `SendKeys`), this can send the **real Windows key** and **any modifier combination** — which is what driving a remote Horizon session requires. List modifiers first and the main key last.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `keys` | string[] | yes | Keys to press together, modifiers first and main key last, e.g. `["Win","R"]` or `["Ctrl","Alt","Insert"]`. A single `"Ctrl+V"`-style string is also accepted. |
+| `times` | number | no | Repeat the main key while modifiers stay held — e.g. `Alt+Tab` ×3 to move three windows back. Default `1`. |
+| `holdMs` | number | no | Milliseconds to hold the main key down on each press. Default `0`. |
+
+Supported key names: `Ctrl`, `Alt`, `Shift`, `Win`, `Tab`, `Enter`, `Esc`, `Space`, `Backspace`, `Delete`, `Insert`, `Home`, `End`, `PageUp`, `PageDown`, `Up`, `Down`, `Left`, `Right`, `Apps`, `PrintScreen`, `A`–`Z`, `0`–`9`, `F1`–`F24`.
+
+Returns: confirmation string `"Pressed: <combo>"`.
+
+---
+
+### `paste_text`
+
+Places text on the clipboard and pastes it with `Ctrl+V`. More reliable than `type_text` for arbitrary characters, long strings, and password fields inside a remote session.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | yes | Text to paste into the focused window |
+
+Returns: confirmation string `"Pasted via clipboard"`.
+
+> **Security:** the value remains on the clipboard after pasting. For passwords or other secrets, follow up with `set_clipboard` set to an empty string to clear it.
+
+---
+
+### `move_mouse`
+
+Moves the cursor to a coordinate without clicking. Use to hover over menus or trigger tooltips.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x` | number | yes | Horizontal pixel coordinate |
+| `y` | number | yes | Vertical pixel coordinate |
+
+Returns: confirmation string `"Moved to (x, y)"`.
+
+---
+
+### `mouse_drag`
+
+Presses at a start point, drags to an end point in small steps, and releases. Use to drag windows, select text, or resize.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x1` | number | yes | Start horizontal pixel coordinate |
+| `y1` | number | yes | Start vertical pixel coordinate |
+| `x2` | number | yes | End horizontal pixel coordinate |
+| `y2` | number | yes | End vertical pixel coordinate |
+| `button` | string | no | `"left"` (default) or `"right"` |
+
+Returns: confirmation string `"Dragged (x1, y1) → (x2, y2)"`.
+
+---
+
+### `wait`
+
+Pauses for a number of milliseconds. Use to let a laggy remote session catch up between an action and the next screenshot.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ms` | number | yes | Milliseconds to wait (capped at 60000) |
+
+Returns: confirmation string `"Waited <ms> ms"`.
+
+---
+
+## Controlling a remote Horizon session
+
+The Horizon Client renders the **entire remote desktop (or published app) as pixels inside a single local window**. This shapes what is and isn't possible:
+
+- The host OS sees only the **Horizon Client window**, not the individual windows running inside the remote session. `list_windows` and `focus_window` therefore operate on **host** windows only — they cannot enumerate or activate a window *inside* the remote desktop.
+- To control the remote, you drive it the way a person does: bring the Horizon window to the foreground, then send keyboard and mouse input that Horizon forwards into the session.
+
+Because `SendKeys` (used by `type_text`/`press_key`) cannot send the Windows key or `Ctrl+Alt+Del`, the `key_combo` and `paste_text` tools are what make the workflows below possible.
+
+**Unlock the remote VM's Windows lock screen**
+
+```
+1. focus_window  "Horizon"            → bring the client to the front
+2. key_combo     ["Ctrl","Alt","Insert"]  → remote Ctrl+Alt+Del (wakes the lock/login screen)
+3. screenshot                          → confirm the password field is shown
+4. click         (password field x, y) → focus the field
+5. paste_text    "<password>"          → enter the password (passed at runtime)
+6. key_combo     ["Enter"]             → submit
+7. set_clipboard ""                    → clear the password from the clipboard
+```
+
+This works only for the **remote VM** session (Horizon forwards input into it). It cannot unlock the **local host** Windows lock screen — that runs on Windows' secure desktop, which blocks all synthetic input by design.
+
+**Restore a minimized app inside the remote session**
+
+```
+1. focus_window  "Horizon"
+2. key_combo     ["Alt","Tab"]         → cycle to the app (add times:N to go further)
+   # or click the app's icon on the remote taskbar after a screenshot
+3. screenshot                          → read the messages / content
+```
+
+**Launch an app inside the remote session**
+
+```
+1. focus_window  "Horizon"
+2. key_combo     ["Win","R"]           → open the remote Run dialog
+3. type_text     "notepad"             → (or the app name / path)
+4. key_combo     ["Enter"]
+5. wait          1500                   → let the app open
+6. screenshot                          → confirm
+```
+
+To launch a **published app from the Horizon catalog** instead, `screenshot` the launcher and `double_click` its icon.
+
+---
+
 ## Architecture
 
 **Transport.** The server uses stdio transport, the standard for local MCP servers. The MCP client process spawns `node dist/index.js` and communicates over stdin/stdout.
@@ -287,9 +405,9 @@ Returns: JSON object `{ "text": <string>, "lines": <string[]> }`. Requires an OC
 
 **Screen capture.** Screenshots use `System.Drawing.Bitmap` + `System.Windows.Forms.Screen` from the .NET framework, which is available on all Windows installations without additional dependencies. The bitmap is serialized to PNG in memory and returned as a base64 string, with a 50 MB stdout buffer to accommodate large or multi-monitor captures.
 
-**Mouse automation.** Clicks use `user32.dll` P/Invoke (`SetCursorPos` + `mouse_event`) compiled inline via PowerShell's `Add-Type`. This bypasses `SendInput` and works with applications that do not respond to higher-level automation APIs.
+**Mouse automation.** Movement, clicks, and drags use `user32.dll` P/Invoke (`SetCursorPos` + `mouse_event`) compiled inline via PowerShell's `Add-Type`. Drags move the cursor in small steps between press and release so the target application registers a genuine drag.
 
-**Keyboard automation.** Text input and key presses use `System.Windows.Forms.SendKeys.SendWait`, which posts keystrokes to the foreground window's message queue. The target window must be focused before calling `type_text` or `press_key`.
+**Keyboard automation.** There are two paths. `type_text` and `press_key` use `System.Windows.Forms.SendKeys.SendWait`, which is convenient for literal text and a fixed set of named keys but cannot express the Windows key or `Ctrl+Alt+Del`. `key_combo` and `paste_text` use `keybd_event` P/Invoke with raw virtual-key codes, which can send any modifier chord including the Windows key — required to drive a remote Horizon session (`Win+R`, `Alt+Tab`, `Ctrl+Alt+Insert`, etc.). The target window must be focused before sending any keyboard input. Key-combo virtual-key codes are looked up from a fixed table and emitted as integers, so user input is never interpolated into the PowerShell script.
 
 **Security.** This server has unrestricted access to the local desktop — it can read any pixel on screen, click anywhere, and type into any focused window. It should only be connected to trusted MCP clients. Do not expose it over a network transport.
 
