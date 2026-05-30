@@ -32,11 +32,11 @@ The compiled output is committed so `npm run build` is only needed after editing
 ## Tool reference
 
 ### `screenshot`
-Captures the primary screen and returns a PNG image. Use this first to understand what is currently displayed before clicking or typing.
+Captures the screen and returns a PNG image. Use this first to understand what is currently displayed before clicking or typing.
 
-```
-No parameters.
-```
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `screen` | number | no | Monitor index (0 = primary, 1 = second, …). Omit to capture all monitors combined into one image. |
 
 ### `click`
 Moves the cursor to pixel coordinates and clicks.
@@ -96,6 +96,65 @@ Brings a window to the foreground. Accepts either a numeric process ID or a part
 | Parameter | Type | Required | Example |
 |-----------|------|----------|---------|
 | `target` | string | yes | `"Horizon"` or `"7432"` |
+
+### `get_foreground_window`
+Returns the title and PID of the window that currently has keyboard focus, as JSON `{Title, Pid}`. Use to confirm a `focus_window` call landed before typing.
+
+```
+No parameters.
+```
+
+### `screenshot_region`
+Captures a rectangular region of the screen and returns a PNG image. Crop to the area of interest to reduce Vision token cost.
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `x` | number | yes |
+| `y` | number | yes |
+| `width` | number | yes |
+| `height` | number | yes |
+
+### `get_pixel_color`
+Samples one screen pixel, returns JSON `{R, G, B, Hex}`. Cheaply detect notification dots or UI state at a known coordinate.
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `x` | number | yes |
+| `y` | number | yes |
+
+### `scroll`
+Scrolls the mouse wheel at `(x, y)`.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `x` | number | yes | |
+| `y` | number | yes | |
+| `direction` | `"up"` \| `"down"` | yes | |
+| `amount` | number | no | Wheel notches (default: 3) |
+
+### `get_clipboard`
+Returns the current clipboard text.
+
+```
+No parameters.
+```
+
+### `set_clipboard`
+Writes text to the clipboard, e.g. to stage a reply for the user to paste with Ctrl+V.
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `text` | string | yes |
+
+### `ocr`
+Extracts text from the screen using the Windows built-in OCR engine — free, offline, no API cost. Returns JSON `{text, lines[]}`. Omit all parameters to scan the full primary screen, or pass all four to scan a region. Use as a cheap pre-filter before a Vision screenshot.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `x` | number | no | Omit all four for full primary screen |
+| `y` | number | no | |
+| `width` | number | no | |
+| `height` | number | no | |
 
 ## Typical workflow for Horizon Client automation
 

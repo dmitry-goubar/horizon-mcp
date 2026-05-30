@@ -3,6 +3,22 @@
   "version": "1.0.0",
   "description": "MCP server for controlling Omnissa Horizon Client via screen automation",
   "type": "module",
+  "license": "MIT",
+  "author": "Dmitry Goubar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmitry-goubar/horizon-mcp.git"
+  },
+  "homepage": "https://github.com/dmitry-goubar/horizon-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/dmitry-goubar/horizon-mcp/issues"
+  },
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",

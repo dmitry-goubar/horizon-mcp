@@ -8,7 +8,7 @@ Controlling a graphical Windows application from an AI assistant normally requir
 
 The primary use case is the Omnissa Horizon Client (formerly VMware Horizon), a remote desktop and published-application client used in enterprise environments. Many enterprise tools live inside Horizon sessions and have no external API. horizon-mcp lets Claude navigate those apps, read data from them, fill in forms, and open remote applications — all by observing the screen and driving the mouse and keyboard. The same tools work on any Windows application.
 
-This server exposes seven tools covering the full input/output surface of a desktop: screen capture (`screenshot`), mouse control (`click`, `double_click`), keyboard input (`type_text`, `press_key`), and window management (`list_windows`, `focus_window`). It exposes no resources or prompts. Because Claude is multimodal, screenshot output is returned as a raw PNG image that Claude reads directly — no OCR library is required.
+This server exposes fourteen tools covering the full input/output surface of a desktop: screen capture (`screenshot`, `screenshot_region`, `get_pixel_color`), mouse control (`click`, `double_click`, `scroll`), keyboard input (`type_text`, `press_key`), window management (`list_windows`, `focus_window`, `get_foreground_window`), clipboard access (`get_clipboard`, `set_clipboard`), and on-device text extraction (`ocr`). It exposes no resources or prompts. Because Claude is multimodal, screenshot output is returned as a raw PNG image that Claude reads directly; the `ocr` tool is offered separately as a cheap, offline pre-filter that uses the Windows built-in OCR engine — no third-party library or API is required.
 
 ## Installation
 
@@ -186,6 +186,96 @@ Brings a window to the foreground by process ID or title substring.
 | `target` | string | yes | A numeric process ID, or a partial case-insensitive window title |
 
 Returns: `"Focused: <title>"` on success, or `"Window not found: <target>"` if no match.
+
+---
+
+### `get_foreground_window`
+
+Returns the window that currently has keyboard focus. Useful to confirm a `focus_window` call landed before typing.
+
+No parameters.
+
+Returns: JSON object `{ "Title": <string>, "Pid": <number> }`.
+
+---
+
+### `screenshot_region`
+
+Captures a rectangular region of the screen and returns it as a PNG image. Use this to crop to just the area of interest (e.g. a chat pane) to reduce Vision token cost.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x` | number | yes | Left edge pixel coordinate |
+| `y` | number | yes | Top edge pixel coordinate |
+| `width` | number | yes | Width in pixels |
+| `height` | number | yes | Height in pixels |
+
+Returns: PNG image data (delivered as an MCP image content block).
+
+---
+
+### `get_pixel_color`
+
+Samples the color of a single screen pixel. Use to cheaply detect a notification dot or a UI state change at a known coordinate without a full screenshot.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x` | number | yes | Horizontal pixel coordinate |
+| `y` | number | yes | Vertical pixel coordinate |
+
+Returns: JSON object `{ "R": <0-255>, "G": <0-255>, "B": <0-255>, "Hex": "#RRGGBB" }`.
+
+---
+
+### `scroll`
+
+Scrolls the mouse wheel at a coordinate. Use to move through chat history or long pages.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x` | number | yes | Horizontal pixel coordinate to scroll at |
+| `y` | number | yes | Vertical pixel coordinate to scroll at |
+| `direction` | string | yes | `"up"` or `"down"` |
+| `amount` | number | no | Number of wheel notches (default: 3) |
+
+Returns: confirmation string `"Scrolled <direction> <amount> notch(es) at (x, y)"`.
+
+---
+
+### `get_clipboard`
+
+Reads the current clipboard text.
+
+No parameters.
+
+Returns: the clipboard text content.
+
+---
+
+### `set_clipboard`
+
+Writes text to the clipboard — useful for staging a reply the user can paste into the remote desktop with `Ctrl+V`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | yes | Text to place on the clipboard |
+
+Returns: confirmation string `"Clipboard updated"`.
+
+---
+
+### `ocr`
+
+Extracts text from the screen using the Windows built-in OCR engine — free, offline, and no API cost. Omit all parameters to scan the full primary screen, or pass all four to scan a region. Use it as a cheap pre-filter before sending a screenshot to Claude Vision: if the OCR text is unchanged, the Vision call can be skipped.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x` | number | no | Left edge of region (omit for full primary screen) |
+| `y` | number | no | Top edge of region |
+| `width` | number | no | Width of region in pixels |
+| `height` | number | no | Height of region in pixels |
+
+Returns: JSON object `{ "text": <string>, "lines": <string[]> }`. Requires an OCR language pack installed in Windows Settings (English is present by default).
 
 ---
 
