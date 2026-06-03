@@ -2,6 +2,8 @@
 
 MCP server that gives Claude eyes and hands on a Windows desktop — take screenshots, move the mouse, type text, and manage windows. Built specifically for interacting with the Omnissa Horizon Client (remote desktop) but works on any Windows application.
 
+This server is the **capability layer** of a two-part system; its companion `horizon-monitor` is the **application layer**. The mechanism-vs-policy split and the rule for where a feature belongs are documented in [ARCHITECTURE.md](ARCHITECTURE.md) — consult it before adding app-specific logic here (it does not belong in the server).
+
 ## Connecting this server to a Claude Code project
 
 Add the following to the project's `.claude/settings.json` (or the global `~/.claude/settings.json`):

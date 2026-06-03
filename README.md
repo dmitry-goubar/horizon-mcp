@@ -399,6 +399,11 @@ To launch a **published app from the Horizon catalog** instead, `screenshot` the
 
 ## Architecture
 
+This section covers the server's internal implementation. For the **system-level
+architecture** — how this server relates to its companion application (`horizon-monitor`),
+and the rule that decides where any given feature belongs — see
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 **Transport.** The server uses stdio transport, the standard for local MCP servers. The MCP client process spawns `node dist/index.js` and communicates over stdin/stdout.
 
 **PowerShell execution.** Every Windows operation (screen capture, mouse, keyboard, window management) runs through PowerShell via `powershell -NonInteractive -EncodedCommand <base64>`. The UTF-16LE base64 encoding eliminates shell-escaping issues with special characters in scripts and user input. Each tool call spawns a new PowerShell process; there is no persistent shell session.
