@@ -23,10 +23,17 @@ The full tool reference lives in [README.md](README.md); do not duplicate it her
 
 ```powershell
 npm install
-npm run build   # tsc: src/index.ts → dist/index.js
+npm run build      # tsc: src → dist
+npm test           # unit tests (node:test, via tsx)
+npm run typecheck  # type-check without emitting
 ```
 
-`dist/index.js` is **committed** so the server runs without a build step. Therefore: **rebuild before committing any `src/` change** — never commit a `src/` edit without its regenerated `dist/`, or the published server goes stale. Use the `commit-mcp` skill, which enforces this.
+- `src/index.ts` — MCP server: tool definitions, request handlers, and all PowerShell / Win32 execution.
+- `src/input.ts` — pure, side-effect-free helpers (key tables, escaping, validation). Unit-testable logic goes here; keep it free of I/O.
+- `src/input.test.ts` — unit tests (excluded from the build).
+- `dist/` — compiled output, **committed**.
+
+`dist/index.js` is **committed** so the server runs without a build step. Therefore: **rebuild before committing any `src/` change** — never commit a `src/` edit without its regenerated `dist/`, or the published server goes stale. CI verifies `dist/` is in sync, and the `commit-mcp` skill enforces the rebuild.
 
 ## Standards to maintain
 

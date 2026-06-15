@@ -10,9 +10,15 @@ The primary use case is the Omnissa Horizon Client (formerly VMware Horizon), a 
 
 This server exposes nineteen tools covering the full input/output surface of a desktop: screen capture (`screenshot`, `screenshot_region`, `get_pixel_color`), mouse control (`click`, `double_click`, `scroll`, `move_mouse`, `mouse_drag`), keyboard input (`type_text`, `press_key`, `key_combo`, `paste_text`), window management (`list_windows`, `focus_window`, `get_foreground_window`), clipboard access (`get_clipboard`, `set_clipboard`), on-device text extraction (`ocr`), and timing (`wait`). It exposes no resources or prompts. Because Claude is multimodal, screenshot output is returned as a raw PNG image that Claude reads directly; the `ocr` tool is offered separately as a cheap, offline pre-filter that uses the Windows built-in OCR engine — no third-party library or API is required.
 
-## Installation
+## Setup
 
-Node.js 18 or later is required. The server runs on Windows only.
+### Prerequisites
+
+- **Windows.** The server drives the desktop through PowerShell and Win32 (`user32.dll`) APIs and runs on Windows only (tested on Windows 11). It will install on macOS or Linux but will not function there.
+- **Node.js 18 or later.**
+- **No secrets, API keys, `.env` file, or SSH keys are required** to run the server — it reads no environment variables and no credential files.
+
+### Install
 
 ```powershell
 git clone https://github.com/sensaiworks/horizon-mcp.git
@@ -21,14 +27,30 @@ npm install
 npm run build
 ```
 
-The compiled output lands in `dist/index.js`. No further setup is needed — all Windows interaction (screen capture, mouse, keyboard) runs through built-in PowerShell and Win32 APIs. No additional binaries are required.
+`npm install` fetches the one runtime dependency (`@modelcontextprotocol/sdk`); the build compiles `src/index.ts` to `dist/index.js`. No additional binaries are required — screen capture, input, and OCR all use built-in Windows/.NET facilities.
 
-To verify the build:
+The compiled `dist/index.js` is committed to the repository, so `npm run build` is only needed after editing `src/`.
+
+To verify the server starts:
 
 ```powershell
 node dist/index.js
 # Server starts and waits on stdin — Ctrl+C to exit
 ```
+
+Then register it with your MCP client — see [Configuration](#configuration) below.
+
+### Moving to another machine
+
+The project is self-contained: a `git pull` brings everything needed. On a fresh Windows machine:
+
+```powershell
+git clone https://github.com/sensaiworks/horizon-mcp.git
+cd horizon-mcp
+npm ci          # restore node_modules from the committed lockfile
+```
+
+`node_modules/` is the only required piece not in version control, so `npm ci` is the single setup step. Because `dist/index.js` is committed, the server then runs without a build. Nothing has to be copied by hand — there are no secrets or local credential files to transfer. The one machine-specific step is recreating the MCP client registration (see [Configuration](#configuration)) with the new local path to `dist/index.js`.
 
 ## Configuration
 
@@ -61,6 +83,8 @@ Add the following entry to your MCP client configuration. The server communicate
 ```
 
 Replace `C:\\path\\to\\horizon-mcp` with the actual path to the cloned repository. Restart the MCP client after editing the configuration.
+
+> **Note:** the package is also set up to run via `npx` (`"command": "npx", "args": ["-y", "horizon-mcp"]`), which avoids cloning and pointing at a local path. That form works once the package is published to npm.
 
 ## Usage
 
@@ -397,6 +421,36 @@ To launch a **published app from the Horizon catalog** instead, `screenshot` the
 
 ---
 
+## Troubleshooting
+
+**Clicks or screenshots land in the wrong place.** On displays with a scaling factor above 100% (or mixed-DPI multi-monitor setups), screen coordinates can be reported in a different space than where input is delivered. Set the affected app — or Windows display scaling — to 100% to confirm, and prefer coordinates read from a fresh `screenshot` at the current scaling.
+
+**`ocr` returns an error about a language pack.** The Windows built-in OCR engine needs a recognition language installed. Add one under *Settings → Time & language → Language & region → (your language) → Language options → install the optional OCR component*, then retry.
+
+**A tool fails with a PowerShell or "is not recognized" error.** PowerShell must be available on `PATH`. If your environment restricts script execution, ensure `powershell.exe` can run; this server invokes it with `-EncodedCommand`, which is unaffected by the script-file execution policy.
+
+**Antivirus or EDR blocks input.** Synthetic mouse/keyboard input and screen capture can trip endpoint-protection heuristics. If actions silently do nothing, check whether security software is blocking the host process and allow-list it if appropriate.
+
+**Keyboard input goes to the wrong window.** Keyboard tools send to whatever window has focus. Call `focus_window` (and confirm with `get_foreground_window`) before typing.
+
+**Nothing happens inside the remote session.** `list_windows`/`focus_window` see only host windows, not windows *inside* a Horizon session. Focus the Horizon window first, then drive the remote with input it forwards — see [Controlling a remote Horizon session](#controlling-a-remote-horizon-session).
+
+## Development
+
+```powershell
+npm install
+npm run build      # tsc: src → dist
+npm test           # unit tests (node:test)
+npm run typecheck  # type-check without emitting
+```
+
+`dist/index.js` is committed, so rebuild before committing any `src/` change. Pure,
+testable logic (key tables, escaping, validation) lives in `src/input.ts`; PowerShell
+execution and MCP wiring live in `src/index.ts`. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the full workflow and [ROADMAP.md](ROADMAP.md) for planned work.
+
+---
+
 ## Architecture
 
 This section covers the server's internal implementation. For the **system-level
@@ -414,7 +468,14 @@ and the rule that decides where any given feature belongs — see
 
 **Keyboard automation.** There are two paths. `type_text` and `press_key` use `System.Windows.Forms.SendKeys.SendWait`, which is convenient for literal text and a fixed set of named keys but cannot express the Windows key or `Ctrl+Alt+Del`. `key_combo` and `paste_text` use `keybd_event` P/Invoke with raw virtual-key codes, which can send any modifier chord including the Windows key — required to drive a remote Horizon session (`Win+R`, `Alt+Tab`, `Ctrl+Alt+Insert`, etc.). The target window must be focused before sending any keyboard input. Key-combo virtual-key codes are looked up from a fixed table and emitted as integers, so user input is never interpolated into the PowerShell script.
 
-**Security.** This server has unrestricted access to the local desktop — it can read any pixel on screen, click anywhere, and type into any focused window. It should only be connected to trusted MCP clients. Do not expose it over a network transport.
+**Security.** This server has unrestricted access to the local desktop — it can read any pixel on screen, click anywhere, and type into any focused window. It should only be connected to trusted MCP clients. Do not expose it over a network transport. It makes no outbound network calls and contains no telemetry. See [SECURITY.md](SECURITY.md) for the full threat model and reporting process.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the build and test
+workflow, [ARCHITECTURE.md](ARCHITECTURE.md) for the design and scope boundaries,
+[ROADMAP.md](ROADMAP.md) for planned work, and [CHANGELOG.md](CHANGELOG.md) for release
+history.
 
 ## License
 

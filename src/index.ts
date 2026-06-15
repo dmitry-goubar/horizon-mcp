@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -6,15 +7,31 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { createRequire } from "node:module";
+import {
+  escapePsSingleQuote,
+  escapeSendKeys,
+  requireFinite,
+  requireInt,
+  parseKeyCombo,
+  buildKeyComboLines,
+} from "./input.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 
 const execAsync = promisify(exec);
+
+// Maximum time a single PowerShell invocation may run before it is killed, so a
+// hung call cannot block the server indefinitely.
+const PS_TIMEOUT_MS = 60_000;
 
 // Run PowerShell using Base64-encoded command to avoid escaping issues
 async function ps(script: string): Promise<string> {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   const { stdout, stderr } = await execAsync(
     `powershell -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`,
-    { maxBuffer: 50 * 1024 * 1024, windowsHide: true }
+    { maxBuffer: 50 * 1024 * 1024, windowsHide: true, timeout: PS_TIMEOUT_MS }
   );
   if (stderr) process.stderr.write(stderr);
   return stdout.trim();
@@ -88,8 +105,7 @@ ${clicks}
 async function sendText(text: string): Promise<void> {
   // Escape SendKeys special chars, then embed in a PS single-quoted string
   // (single-quoted strings are fully literal in PowerShell — no $ or backtick expansion)
-  const sendKeysEscaped = text.replace(/([+^%~(){}[\]])/g, "{$1}");
-  const psLiteral = sendKeysEscaped.replace(/'/g, "''"); // ' → '' is the only escape needed
+  const psLiteral = escapePsSingleQuote(escapeSendKeys(text));
   await ps(`
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.SendKeys]::SendWait('${psLiteral}')
@@ -142,7 +158,7 @@ Get-Process | Where-Object { $_.MainWindowTitle -ne "" } |
 async function focusWindow(pidOrTitle: string): Promise<string> {
   const isNumeric = /^\d+$/.test(pidOrTitle.trim());
   // Embed title in a PS single-quoted string — escape ' as '' (no other escaping needed)
-  const safeTitle = pidOrTitle.replace(/'/g, "''");
+  const safeTitle = escapePsSingleQuote(pidOrTitle);
   const selector = isNumeric
     ? `Where-Object { $_.Id -eq ${pidOrTitle} }`
     : `Where-Object { $_.MainWindowTitle -like '*${safeTitle}*' }`;
@@ -242,7 +258,7 @@ async function getClipboard(): Promise<string> {
 
 // Write text to the clipboard
 async function setClipboard(text: string): Promise<void> {
-  const safeText = text.replace(/'/g, "''");
+  const safeText = escapePsSingleQuote(text);
   await ps(`Set-Clipboard -Value '${safeText}'`);
 }
 
@@ -301,57 +317,12 @@ try {
 `);
 }
 
-// Virtual-key codes for keybd_event (case-insensitive lookup).
-// Unlike SendKeys, keybd_event can send the real Windows key and any chord,
-// which is required to drive a remote Horizon session (Win+R, Alt+Tab,
-// Ctrl+Alt+Insert = remote Ctrl+Alt+Del, Win+number, etc.).
-const VK: Record<string, number> = {
-  ctrl: 0x11, control: 0x11, alt: 0x12, menu: 0x12, shift: 0x10,
-  win: 0x5b, lwin: 0x5b, rwin: 0x5c,
-  enter: 0x0d, return: 0x0d, esc: 0x1b, escape: 0x1b, tab: 0x09, space: 0x20,
-  backspace: 0x08, delete: 0x2e, del: 0x2e, insert: 0x2d, ins: 0x2d,
-  home: 0x24, end: 0x23, pageup: 0x21, pgup: 0x21, pagedown: 0x22, pgdn: 0x22,
-  up: 0x26, down: 0x28, left: 0x25, right: 0x27,
-  apps: 0x5d, menukey: 0x5d, printscreen: 0x2c, prtsc: 0x2c, capslock: 0x14, pause: 0x13,
-};
-for (let c = 65; c <= 90; c++) VK[String.fromCharCode(c).toLowerCase()] = c; // a-z
-for (let d = 0; d <= 9; d++) VK[String(d)] = 0x30 + d;                       // 0-9
-for (let f = 1; f <= 24; f++) VK["f" + f] = 0x6f + f;                        // F1=0x70 .. F24=0x87
-
-// Keys on the extended-key region (arrows, nav block, Win, Apps) need the
-// KEYEVENTF_EXTENDEDKEY flag so they are interpreted correctly.
-const VK_EXTENDED = new Set([
-  0x2e, 0x2d, 0x24, 0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0x5b, 0x5c, 0x5d, 0x2c,
-]);
-
-function vkOf(name: string): number {
-  const v = VK[name.trim().toLowerCase()];
-  if (v === undefined) throw new Error(`Unknown key in combo: "${name}"`);
-  return v;
-}
-
 // Press a chord of keys via keybd_event. Modifiers come first, the main key
-// last: e.g. ["Win","R"], ["Ctrl","Alt","Insert"], ["Alt","Tab"].
-// `times` repeats the main key while modifiers stay held (e.g. Alt+Tab x3).
+// last: e.g. ["Win","R"], ["Ctrl","Alt","Insert"], ["Alt","Tab"]. The key tables
+// and statement generation live in input.ts (and are unit-tested); all emitted
+// values are integers from the validated VK map, so there is no script injection.
 async function keyCombo(keys: string[], times: number, holdMs: number): Promise<void> {
-  if (keys.length === 0) throw new Error("key_combo requires at least one key");
-  const codes = keys.map(vkOf);
-  const main = codes[codes.length - 1];
-  const mods = codes.slice(0, -1);
-  const repeat = Math.max(1, Math.floor(times));
-  // KEYEVENTF_EXTENDEDKEY=0x1, KEYEVENTF_KEYUP=0x2 — all VK codes are integers
-  // from the validated map, so there is no string injection into the script.
-  const ev = (vk: number, up: boolean) =>
-    `[Kbd]::keybd_event(${vk}, 0, ${(VK_EXTENDED.has(vk) ? 1 : 0) | (up ? 2 : 0)}, [UIntPtr]::Zero)`;
-  const lines: string[] = [];
-  for (const m of mods) lines.push(ev(m, false));
-  for (let i = 0; i < repeat; i++) {
-    lines.push(ev(main, false));
-    if (holdMs > 0) lines.push(`Start-Sleep -Milliseconds ${Math.floor(holdMs)}`);
-    lines.push(ev(main, true));
-    if (i < repeat - 1) lines.push(`Start-Sleep -Milliseconds 40`);
-  }
-  for (const m of [...mods].reverse()) lines.push(ev(m, true));
+  const lines = buildKeyComboLines(keys, times, holdMs);
   await ps(`
 Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -368,7 +339,7 @@ ${lines.join("\n")}
 // in a remote session. NOTE: the value remains on the clipboard afterwards —
 // for secrets, follow up with set_clipboard "" to clear it.
 async function pasteText(text: string): Promise<void> {
-  const safe = text.replace(/'/g, "''");
+  const safe = escapePsSingleQuote(text);
   await ps(`
 Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -427,7 +398,7 @@ Start-Sleep -Milliseconds 60
 // --- MCP Server setup ---
 
 const server = new Server(
-  { name: "horizon-mcp", version: "1.0.0" },
+  { name: "horizon-mcp", version },
   { capabilities: { tools: {} } }
 );
 
@@ -682,25 +653,22 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     switch (name) {
       case "screenshot": {
-        const screenIdx = a.screen !== undefined ? Number(a.screen) : undefined;
+        const screenIdx = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
         const data = await takeScreenshot(screenIdx);
         return {
           content: [{ type: "image", data, mimeType: "image/png" }],
         };
       }
       case "click": {
-        await mouseClick(
-          Number(a.x),
-          Number(a.y),
-          (a.button as "left" | "right") ?? "left",
-          false
-        );
-        return { content: [{ type: "text", text: `Clicked (${a.x}, ${a.y})` }] };
+        const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
+        await mouseClick(x, y, (a.button as "left" | "right") ?? "left", false);
+        return { content: [{ type: "text", text: `Clicked (${x}, ${y})` }] };
       }
       case "double_click": {
-        await mouseClick(Number(a.x), Number(a.y), "left", true);
+        const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
+        await mouseClick(x, y, "left", true);
         return {
-          content: [{ type: "text", text: `Double-clicked (${a.x}, ${a.y})` }],
+          content: [{ type: "text", text: `Double-clicked (${x}, ${y})` }],
         };
       }
       case "type_text": {
@@ -725,18 +693,20 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "screenshot_region": {
         const data = await screenshotRegion(
-          Number(a.x), Number(a.y), Number(a.width), Number(a.height)
+          requireInt(a.x, "x"), requireInt(a.y, "y"),
+          requireInt(a.width, "width"), requireInt(a.height, "height")
         );
         return { content: [{ type: "image", data, mimeType: "image/png" }] };
       }
       case "get_pixel_color": {
-        const result = await getPixelColor(Number(a.x), Number(a.y));
+        const result = await getPixelColor(requireInt(a.x, "x"), requireInt(a.y, "y"));
         return { content: [{ type: "text", text: result }] };
       }
       case "scroll": {
-        const amount = a.amount !== undefined ? Number(a.amount) : 3;
-        await scroll(Number(a.x), Number(a.y), (a.direction as "up" | "down"), amount);
-        return { content: [{ type: "text", text: `Scrolled ${a.direction} ${amount} notch(es) at (${a.x}, ${a.y})` }] };
+        const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
+        const amount = a.amount !== undefined ? requireInt(a.amount, "amount") : 3;
+        await scroll(x, y, (a.direction as "up" | "down"), amount);
+        return { content: [{ type: "text", text: `Scrolled ${a.direction} ${amount} notch(es) at (${x}, ${y})` }] };
       }
       case "get_clipboard": {
         const result = await getClipboard();
@@ -749,17 +719,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "ocr": {
         const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
         const result = hasRegion
-          ? await runOcr(Number(a.x), Number(a.y), Number(a.width), Number(a.height))
+          ? await runOcr(
+              requireInt(a.x, "x"), requireInt(a.y, "y"),
+              requireInt(a.width, "width"), requireInt(a.height, "height")
+            )
           : await runOcr();
         return { content: [{ type: "text", text: result }] };
       }
       case "key_combo": {
-        const raw = a.keys;
-        const keys = Array.isArray(raw)
-          ? raw.map(String)
-          : String(raw).split("+").map((s) => s.trim()).filter(Boolean);
-        const times = a.times !== undefined ? Number(a.times) : 1;
-        const holdMs = a.holdMs !== undefined ? Number(a.holdMs) : 0;
+        const keys = parseKeyCombo(a.keys);
+        const times = a.times !== undefined ? requireFinite(a.times, "times") : 1;
+        const holdMs = a.holdMs !== undefined ? requireFinite(a.holdMs, "holdMs") : 0;
         await keyCombo(keys, times, holdMs);
         return { content: [{ type: "text", text: `Pressed: ${keys.join("+")}${times > 1 ? ` x${times}` : ""}` }] };
       }
@@ -768,18 +738,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return { content: [{ type: "text", text: "Pasted via clipboard" }] };
       }
       case "move_mouse": {
-        await moveMouse(Number(a.x), Number(a.y));
-        return { content: [{ type: "text", text: `Moved to (${a.x}, ${a.y})` }] };
+        const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
+        await moveMouse(x, y);
+        return { content: [{ type: "text", text: `Moved to (${x}, ${y})` }] };
       }
       case "mouse_drag": {
-        await mouseDrag(
-          Number(a.x1), Number(a.y1), Number(a.x2), Number(a.y2),
-          (a.button as "left" | "right") ?? "left"
-        );
-        return { content: [{ type: "text", text: `Dragged (${a.x1}, ${a.y1}) → (${a.x2}, ${a.y2})` }] };
+        const x1 = requireInt(a.x1, "x1"), y1 = requireInt(a.y1, "y1");
+        const x2 = requireInt(a.x2, "x2"), y2 = requireInt(a.y2, "y2");
+        await mouseDrag(x1, y1, x2, y2, (a.button as "left" | "right") ?? "left");
+        return { content: [{ type: "text", text: `Dragged (${x1}, ${y1}) → (${x2}, ${y2})` }] };
       }
       case "wait": {
-        const ms = Math.min(Math.max(Number(a.ms) || 0, 0), 60000);
+        const ms = Math.min(Math.max(requireFinite(a.ms, "ms"), 0), 60000);
         await new Promise((resolve) => setTimeout(resolve, ms));
         return { content: [{ type: "text", text: `Waited ${ms} ms` }] };
       }
@@ -794,6 +764,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
   }
 });
+
+if (process.platform !== "win32") {
+  process.stderr.write(
+    `horizon-mcp requires Windows (win32); detected platform "${process.platform}". Exiting.\n`
+  );
+  process.exit(1);
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

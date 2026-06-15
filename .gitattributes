@@ -1,0 +1,4 @@
+# Normalize line endings to LF in the repository so the committed dist/ stays
+# byte-identical across platforms (the CI dist-sync check depends on this).
+* text=auto eol=lf
+*.png binary
