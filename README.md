@@ -15,7 +15,7 @@ This server exposes nineteen tools covering the full input/output surface of a d
 Node.js 18 or later is required. The server runs on Windows only.
 
 ```powershell
-git clone https://github.com/dmitry-goubar/horizon-mcp.git
+git clone https://github.com/sensaiworks/horizon-mcp.git
 cd horizon-mcp
 npm install
 npm run build

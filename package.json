@@ -7,11 +7,11 @@
   "author": "Dmitry Goubar",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmitry-goubar/horizon-mcp.git"
+    "url": "git+https://github.com/sensaiworks/horizon-mcp.git"
   },
-  "homepage": "https://github.com/dmitry-goubar/horizon-mcp#readme",
+  "homepage": "https://github.com/sensaiworks/horizon-mcp#readme",
   "bugs": {
-    "url": "https://github.com/dmitry-goubar/horizon-mcp/issues"
+    "url": "https://github.com/sensaiworks/horizon-mcp/issues"
   },
   "os": [
     "win32"
