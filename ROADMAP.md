@@ -17,6 +17,10 @@ data belong in the application layer, not here — see [ARCHITECTURE.md](ARCHITE
 - ✅ Input validation: finite-number checks for coordinates with clear error messages.
 - ✅ Hardening: per-call PowerShell timeout, Windows-platform startup guard, server
   version read from `package.json` instead of being hardcoded.
+- ✅ Fix `ocr` on Windows PowerShell 5.1 (the WinRT `AsTask` await bridge returned a null
+  array). Root-caused and verified against a live Horizon session.
+- ✅ Force UTF-8 PowerShell output so non-ASCII characters in window titles, clipboard, and
+  OCR text are no longer mangled.
 - 🔜 ESLint + Prettier with a `lint` script and CI enforcement.
 - 🔜 Stronger error propagation from PowerShell (surface non-terminating errors instead
   of returning empty output).
@@ -53,8 +57,11 @@ session before shipping, so they are planned rather than done.
   deterministic alternative to Vision.
 - 🔜 Smaller input additions — middle mouse button, separate key down/up primitives,
   image clipboard get/set, monitor enumeration (resolution/DPI/position).
-- 💤 **DPI-awareness audit** — verify click and capture coordinates on scaled (>100%) and
-  mixed-DPI multi-monitor setups; document or fix any coordinate-space mismatch.
+- 🔜 **DPI-awareness audit** — the primary monitor is validated: native 1920×1080 capture
+  (full and region), and `SetCursorPos` round-trips exactly at multiple points including
+  both corners, so capture and input share a 1:1 coordinate space at 100% scale. Still to
+  verify: scaled (>100%) displays and mixed-DPI multi-monitor setups, which can virtualize
+  coordinates — document or fix any mismatch there.
 
 ## Documentation
 

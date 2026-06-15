@@ -28,6 +28,15 @@ All notable changes to this project are documented here. The format is based on
   server indefinitely.
 - The server exits at startup with a clear message when run on a non-Windows platform.
 
+### Fixed
+- `ocr` failed with "Cannot index into a null array" on Windows PowerShell 5.1. The WinRT
+  async bridge now resolves the `AsTask` overload by its parameter type and passes the
+  result type explicitly, instead of deriving the generic argument from the operation's
+  interfaces (which returned null on some setups). Verified against a live session.
+- Non-ASCII characters in `list_windows`, `get_foreground_window`, `get_clipboard`, and
+  `ocr` output were mangled to `?`/replacement characters. PowerShell output is now forced
+  to UTF-8 so titles, clipboard text, and OCR results round-trip correctly.
+
 ## [1.0.0]
 
 ### Added

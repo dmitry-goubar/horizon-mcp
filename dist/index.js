@@ -12,10 +12,14 @@ const execAsync = promisify(exec);
 // Maximum time a single PowerShell invocation may run before it is killed, so a
 // hung call cannot block the server indefinitely.
 const PS_TIMEOUT_MS = 60_000;
-// Run PowerShell using Base64-encoded command to avoid escaping issues
+// Run PowerShell using Base64-encoded command to avoid escaping issues.
+// Force UTF-8 output so non-ASCII characters (in window titles, clipboard, OCR
+// text) survive the pipe; Windows PowerShell otherwise emits the console code
+// page, which Node decodes as UTF-8 and mangles into '?'/replacement chars.
 async function ps(script) {
-    const encoded = Buffer.from(script, "utf16le").toString("base64");
-    const { stdout, stderr } = await execAsync(`powershell -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, { maxBuffer: 50 * 1024 * 1024, windowsHide: true, timeout: PS_TIMEOUT_MS });
+    const wrapped = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + script;
+    const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
+    const { stdout, stderr } = await execAsync(`powershell -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, { maxBuffer: 50 * 1024 * 1024, windowsHide: true, timeout: PS_TIMEOUT_MS, encoding: "utf8" });
     if (stderr)
         process.stderr.write(stderr);
     return stdout.trim();
@@ -251,14 +255,17 @@ Add-Type -AssemblyName System.Windows.Forms
 [void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime]
 [void][Windows.Storage.StorageFile,            Windows.Foundation, ContentType=WindowsRuntime]
 
-function Await([object]$Op) {
-    $iface = $Op.GetType().GetInterfaces() |
-             Where-Object { $_.IsGenericType -and $_.Name -eq 'IAsyncOperation\`1' } |
-             Select-Object -First 1
-    $m = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
-          Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 } |
-          Select-Object -First 1).MakeGenericMethod($iface.GenericTypeArguments[0])
-    $m.Invoke($null, @($Op)).GetAwaiter().GetResult()
+# Resolve the AsTask overload by its parameter type (robust across PS 5.1
+# WinRT projections), then pass the result type explicitly. Deriving the generic
+# argument from the operation's own interfaces returns null on some setups.
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1'
+})[0]
+function Await($WinRtTask, $ResultType) {
+    $netTask = $asTaskGeneric.MakeGenericMethod($ResultType).Invoke($null, @($WinRtTask))
+    $netTask.Wait(-1) | Out-Null
+    $netTask.Result
 }
 
 ${captureScript}
@@ -266,13 +273,13 @@ $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]:
 $bmp.Save($tmp); $bmp.Dispose()
 
 try {
-    $sf   = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($tmp))
-    $stm  = Await ($sf.OpenReadAsync())
-    $dec  = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stm))
-    $sbmp = Await ($dec.GetSoftwareBitmapAsync())
+    $sf   = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($tmp)) ([Windows.Storage.StorageFile])
+    $stm  = Await ($sf.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
+    $dec  = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stm)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $sbmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
     $eng  = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
     if (-not $eng) { throw 'No OCR engine available — install a language pack in Windows Settings' }
-    $res   = Await ($eng.RecognizeAsync($sbmp))
+    $res   = Await ($eng.RecognizeAsync($sbmp)) ([Windows.Media.Ocr.OcrResult])
     $lines = @($res.Lines | ForEach-Object { $_.Text })
     ConvertTo-Json -Compress @{ text = $res.Text; lines = $lines }
 } finally {
