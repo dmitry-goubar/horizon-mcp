@@ -22,6 +22,11 @@ const PS_TIMEOUT_MS = 60_000;
 //   which Node decodes as UTF-8 and mangles into '?'/replacement chars.
 async function ps(script) {
     const wrapped = "$ErrorActionPreference = 'Stop'\n" +
+        // Suppress the progress stream. Module auto-loading emits a "Preparing modules
+        // for first use" progress record that PowerShell serialises to stderr as CLIXML;
+        // for input commands (key_combo/type_text/press_key) that produce no stdout, that
+        // stderr text was being thrown as a spurious error even though the keystroke fired.
+        "$ProgressPreference = 'SilentlyContinue'\n" +
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" +
         script;
     const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
@@ -125,15 +130,22 @@ ${resolveCursorPs(x, y, screen)}
 ${clicks}
 `);
 }
-// Type text via SendKeys
+// Type text via SendKeys, one character at a time with a small delay between
+// keystrokes. SendWait on the whole string at once drops characters when the target
+// is a remote Horizon session — the remote can't ingest a fast burst, so e.g. a
+// 13-char password arrives as ~4 chars. Pacing each keystroke makes typing reliable.
+// For long or multi-line text, prefer paste_text (clipboard), which is a single event.
+const TYPE_CHAR_DELAY_MS = 30;
 async function sendText(text) {
-    // Escape SendKeys special chars, then embed in a PS single-quoted string
-    // (single-quoted strings are fully literal in PowerShell — no $ or backtick expansion)
-    const psLiteral = escapePsSingleQuote(escapeSendKeys(text));
-    await ps(`
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.SendKeys]::SendWait('${psLiteral}')
-`);
+    if (!text)
+        return;
+    // Spread by code point (handles surrogate pairs); escape each char for SendKeys,
+    // then embed in a PS single-quoted literal (fully literal — no $/backtick expansion).
+    const lines = [...text].map((ch) => {
+        const lit = escapePsSingleQuote(escapeSendKeys(ch));
+        return `[System.Windows.Forms.SendKeys]::SendWait('${lit}'); Start-Sleep -Milliseconds ${TYPE_CHAR_DELAY_MS}`;
+    });
+    await ps("Add-Type -AssemblyName System.Windows.Forms\n" + lines.join("\n"));
 }
 // Press a named key (Enter, Escape, Tab, etc.)
 async function pressKey(key) {
