@@ -13,6 +13,7 @@ import {
   escapeSendKeys,
   requireFinite,
   requireInt,
+  parseHexColor,
   parseKeyCombo,
   buildKeyComboLines,
 } from "./input.js";
@@ -22,23 +23,45 @@ const { version } = require("../package.json") as { version: string };
 
 const execAsync = promisify(exec);
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 // Maximum time a single PowerShell invocation may run before it is killed, so a
 // hung call cannot block the server indefinitely.
 const PS_TIMEOUT_MS = 60_000;
 
 // Run PowerShell using Base64-encoded command to avoid escaping issues.
-// Force UTF-8 output so non-ASCII characters (in window titles, clipboard, OCR
-// text) survive the pipe; Windows PowerShell otherwise emits the console code
-// page, which Node decodes as UTF-8 and mangles into '?'/replacement chars.
+// - `Stop` error preference promotes non-terminating errors to terminating ones,
+//   so a failing cmdlet exits non-zero and is reported instead of silently
+//   returning empty output.
+// - UTF-8 output so non-ASCII characters (in window titles, clipboard, OCR text)
+//   survive the pipe; Windows PowerShell otherwise emits the console code page,
+//   which Node decodes as UTF-8 and mangles into '?'/replacement chars.
 async function ps(script: string): Promise<string> {
-  const wrapped = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + script;
+  const wrapped =
+    "$ErrorActionPreference = 'Stop'\n" +
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" +
+    script;
   const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
-  const { stdout, stderr } = await execAsync(
-    `powershell -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`,
-    { maxBuffer: 50 * 1024 * 1024, windowsHide: true, timeout: PS_TIMEOUT_MS, encoding: "utf8" }
-  );
-  if (stderr) process.stderr.write(stderr);
-  return stdout.trim();
+  try {
+    const { stdout, stderr } = await execAsync(
+      `powershell -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`,
+      { maxBuffer: 50 * 1024 * 1024, windowsHide: true, timeout: PS_TIMEOUT_MS, encoding: "utf8" }
+    );
+    const out = stdout.trim();
+    const errText = stderr.trim();
+    // Exit was 0. If the script produced no output but did write to the error
+    // stream, treat that as a failure rather than returning empty success.
+    if (!out && errText) throw new Error(errText);
+    if (errText) process.stderr.write(stderr);
+    return out;
+  } catch (err) {
+    // execAsync rejects on a non-zero exit (a terminating PowerShell error) or a
+    // timeout; surface the PowerShell error text rather than the generic wrapper.
+    const e = err as { stderr?: string; killed?: boolean; message?: string };
+    if (e.killed) throw new Error(`PowerShell call timed out after ${PS_TIMEOUT_MS} ms`);
+    const detail = e.stderr?.trim() || e.message || String(err);
+    throw new Error(detail);
+  }
 }
 
 // Capture a screen by index (0 = primary, 1 = second, ...) or all screens combined
@@ -158,14 +181,21 @@ Get-Process | Where-Object { $_.MainWindowTitle -ne "" } |
 `);
 }
 
-// Bring a window to the foreground by PID or partial title
-async function focusWindow(pidOrTitle: string): Promise<string> {
+// Build a PowerShell `Where-Object` clause that matches a window by numeric PID or
+// case-insensitive partial title. The numeric branch is gated by a digits-only test
+// and the title is embedded in a single-quoted PS string (with '' escaping), so user
+// input is never interpolated as code. Shared by all the window tools.
+function windowSelector(pidOrTitle: string): string {
   const isNumeric = /^\d+$/.test(pidOrTitle.trim());
-  // Embed title in a PS single-quoted string — escape ' as '' (no other escaping needed)
   const safeTitle = escapePsSingleQuote(pidOrTitle);
-  const selector = isNumeric
+  return isNumeric
     ? `Where-Object { $_.Id -eq ${pidOrTitle} }`
     : `Where-Object { $_.MainWindowTitle -like '*${safeTitle}*' }`;
+}
+
+// Bring a window to the foreground by PID or partial title
+async function focusWindow(pidOrTitle: string): Promise<string> {
+  const selector = windowSelector(pidOrTitle);
 
   return ps(`
 Add-Type @"
@@ -228,6 +258,118 @@ $sb = New-Object System.Text.StringBuilder(256)
 $pid_ = [uint32]0
 [FgWin]::GetWindowThreadProcessId($h, [ref]$pid_) | Out-Null
 ConvertTo-Json -Compress @{ Title = $sb.ToString(); Pid = [int]$pid_ }
+`);
+}
+
+// Return a window's screen rectangle (by PID or partial title) as JSON.
+async function getWindowRect(pidOrTitle: string): Promise<string> {
+  const selector = windowSelector(pidOrTitle);
+  return ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class WinRect {
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+}
+"@
+$p = Get-Process | ${selector} | Select-Object -First 1
+if ($p) {
+  $r = New-Object WinRect+RECT
+  [WinRect]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+  ConvertTo-Json -Compress @{ Title = $p.MainWindowTitle; Pid = $p.Id;
+    Left = $r.Left; Top = $r.Top; Right = $r.Right; Bottom = $r.Bottom;
+    Width = ($r.Right - $r.Left); Height = ($r.Bottom - $r.Top) }
+} else { "Window not found: ${pidOrTitle}" }
+`);
+}
+
+// Minimize, maximize, restore, or close a window (by PID or partial title).
+async function windowAction(
+  pidOrTitle: string,
+  action: "minimize" | "maximize" | "restore" | "close"
+): Promise<string> {
+  const selector = windowSelector(pidOrTitle);
+  // action is validated against this fixed set in the handler, so the looked-up
+  // statement is never built from raw user input.
+  const op: Record<typeof action, string> = {
+    minimize: "[WinAct]::ShowWindow($h, 6)",          // SW_MINIMIZE
+    maximize: "[WinAct]::ShowWindow($h, 3)",          // SW_MAXIMIZE
+    restore:  "[WinAct]::ShowWindow($h, 9)",          // SW_RESTORE
+    close:    "[WinAct]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)", // WM_CLOSE
+  };
+  return ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class WinAct {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+}
+"@
+$p = Get-Process | ${selector} | Select-Object -First 1
+if ($p) {
+  $h = $p.MainWindowHandle
+  ${op[action]} | Out-Null
+  "${action}: $($p.MainWindowTitle)"
+} else { "Window not found: ${pidOrTitle}" }
+`);
+}
+
+// Move and/or resize a window. Omitted dimensions keep their current value, read
+// from the window's existing rectangle.
+async function setWindowBounds(
+  pidOrTitle: string,
+  x?: number, y?: number, width?: number, height?: number
+): Promise<string> {
+  const selector = windowSelector(pidOrTitle);
+  const nx = x !== undefined ? `${x}` : "$r.Left";
+  const ny = y !== undefined ? `${y}` : "$r.Top";
+  const nw = width !== undefined ? `${width}` : "($r.Right - $r.Left)";
+  const nh = height !== undefined ? `${height}` : "($r.Bottom - $r.Top)";
+  return ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class WinMove {
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+}
+"@
+$p = Get-Process | ${selector} | Select-Object -First 1
+if ($p) {
+  $h = $p.MainWindowHandle
+  $r = New-Object WinMove+RECT
+  [WinMove]::GetWindowRect($h, [ref]$r) | Out-Null
+  [WinMove]::MoveWindow($h, ${nx}, ${ny}, ${nw}, ${nh}, $true) | Out-Null
+  "Set bounds: $($p.MainWindowTitle)"
+} else { "Window not found: ${pidOrTitle}" }
+`);
+}
+
+// Enumerate monitors with bounds, primary flag, and effective DPI/scale.
+async function listMonitors(): Promise<string> {
+  return ps(`
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class MonDpi {
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+  [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hmon, int type, out uint x, out uint y);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  public static uint Get(int x, int y) {
+    POINT p; p.X = x; p.Y = y;
+    IntPtr h = MonitorFromPoint(p, 2); // MONITOR_DEFAULTTONEAREST
+    uint dx, dy; GetDpiForMonitor(h, 0, out dx, out dy); return dx;
+  }
+}
+"@
+$mons = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+  $b = $_.Bounds
+  $dpi = [MonDpi]::Get($b.X + [int]($b.Width / 2), $b.Y + [int]($b.Height / 2))
+  @{ device = $_.DeviceName; primary = $_.Primary;
+     x = $b.X; y = $b.Y; width = $b.Width; height = $b.Height;
+     dpi = [int]$dpi; scale = [int][math]::Round($dpi / 96 * 100) }
+})
+ConvertTo-Json -Compress -Depth 4 $mons
 `);
 }
 
@@ -294,17 +436,23 @@ async function setClipboard(text: string): Promise<void> {
 }
 
 // Extract text from the screen (or a region) using Windows built-in WinRT OCR.
-// Returns JSON { text: string, lines: string[] }.
-// Uses a temp PNG file to bridge System.Drawing and the WinRT BitmapDecoder.
+// Returns JSON { text, lines:[{ text, x, y, width, height, words:[{ text, x, y,
+// width, height }] }] }, where every box is in absolute screen pixels (the region
+// offset is added back), so located text can be clicked directly without a Vision
+// round-trip. Uses a temp PNG file to bridge System.Drawing and the WinRT BitmapDecoder.
 async function runOcr(x?: number, y?: number, width?: number, height?: number): Promise<string> {
   const hasRegion = x !== undefined && y !== undefined && width !== undefined && height !== undefined;
 
+  // $offX/$offY are the captured bitmap's top-left in screen space; OCR returns
+  // box coordinates relative to the bitmap, so adding the offset makes them absolute.
   const captureScript = hasRegion
-    ? `$bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
+    ? `$offX = ${x}; $offY = ${y}
+$bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
 $gfx.CopyFromScreen(${x}, ${y}, 0, 0, $bmp.Size)
 $gfx.Dispose()`
     : `$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$offX = $s.Location.X; $offY = $s.Location.Y
 $bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
 $gfx.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
@@ -343,8 +491,26 @@ try {
     $eng  = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
     if (-not $eng) { throw 'No OCR engine available — install a language pack in Windows Settings' }
     $res   = Await ($eng.RecognizeAsync($sbmp)) ([Windows.Media.Ocr.OcrResult])
-    $lines = @($res.Lines | ForEach-Object { $_.Text })
-    ConvertTo-Json -Compress @{ text = $res.Text; lines = $lines }
+    $lines = @($res.Lines | ForEach-Object {
+        $ln = $_
+        $words = @($ln.Words | ForEach-Object {
+            $r = $_.BoundingRect
+            @{ text   = $_.Text
+               x      = [int][math]::Round($offX + $r.X)
+               y      = [int][math]::Round($offY + $r.Y)
+               width  = [int][math]::Round($r.Width)
+               height = [int][math]::Round($r.Height) }
+        })
+        # An OCR line exposes no rect of its own; derive it from its words' rects.
+        if ($words.Count) {
+            $minX = ($words | ForEach-Object { $_.x }              | Measure-Object -Minimum).Minimum
+            $minY = ($words | ForEach-Object { $_.y }              | Measure-Object -Minimum).Minimum
+            $maxX = ($words | ForEach-Object { $_.x + $_.width }   | Measure-Object -Maximum).Maximum
+            $maxY = ($words | ForEach-Object { $_.y + $_.height }  | Measure-Object -Maximum).Maximum
+        } else { $minX = 0; $minY = 0; $maxX = 0; $maxY = 0 }
+        @{ text = $ln.Text; x = $minX; y = $minY; width = ($maxX - $minX); height = ($maxY - $minY); words = $words }
+    })
+    ConvertTo-Json -Compress -Depth 6 @{ text = $res.Text; lines = $lines }
 } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
@@ -427,6 +593,61 @@ for ($i = 1; $i -le $steps; $i++) {
 Start-Sleep -Milliseconds 60
 [MouseDr]::mouse_event(${up}, 0, 0, 0, 0)
 `);
+}
+
+// Poll a pixel until it matches a target color (within per-channel tolerance) or
+// the timeout elapses. Each sample is a short PowerShell call, so the total wait
+// can safely exceed the per-call timeout. Returns JSON { matched, color, elapsedMs }.
+async function waitForPixel(
+  x: number, y: number, hex: string,
+  timeoutMs: number, intervalMs: number, tolerance: number
+): Promise<string> {
+  const target = parseHexColor(hex); // throws on malformed input
+  const start = Date.now();
+  for (;;) {
+    let c = { R: -1, G: -1, B: -1, Hex: "" };
+    try { c = JSON.parse(await getPixelColor(x, y)); } catch { /* keep sentinel */ }
+    const matched =
+      Math.abs(c.R - target.r) <= tolerance &&
+      Math.abs(c.G - target.g) <= tolerance &&
+      Math.abs(c.B - target.b) <= tolerance;
+    const elapsedMs = Date.now() - start;
+    if (matched) return JSON.stringify({ matched: true, color: c.Hex, elapsedMs });
+    if (elapsedMs >= timeoutMs) return JSON.stringify({ matched: false, color: c.Hex, elapsedMs });
+    await sleep(Math.min(intervalMs, Math.max(0, timeoutMs - elapsedMs)));
+  }
+}
+
+interface OcrLine { text: string; x: number; y: number; width: number; height: number }
+
+// Poll OCR until a case-insensitive substring appears, or the timeout elapses.
+// On a match, returns the found line's text and bounding box so the caller can
+// click it. Returns JSON { matched, elapsedMs, match: OcrLine | null }.
+async function waitForText(
+  needle: string, timeoutMs: number, intervalMs: number,
+  x?: number, y?: number, width?: number, height?: number
+): Promise<string> {
+  const hasRegion = x !== undefined && y !== undefined && width !== undefined && height !== undefined;
+  const target = needle.toLowerCase();
+  const start = Date.now();
+  for (;;) {
+    let lines: OcrLine[] = [];
+    try {
+      const parsed = JSON.parse(hasRegion ? await runOcr(x, y, width, height) : await runOcr());
+      // ConvertTo-Json renders a single-element array as an object; normalize.
+      lines = Array.isArray(parsed.lines) ? parsed.lines : parsed.lines ? [parsed.lines] : [];
+    } catch { /* treat unparseable output as no match this round */ }
+    const hit = lines.find((l) => (l.text ?? "").toLowerCase().includes(target));
+    const elapsedMs = Date.now() - start;
+    if (hit) {
+      return JSON.stringify({
+        matched: true, elapsedMs,
+        match: { text: hit.text, x: hit.x, y: hit.y, width: hit.width, height: hit.height },
+      });
+    }
+    if (elapsedMs >= timeoutMs) return JSON.stringify({ matched: false, elapsedMs, match: null });
+    await sleep(Math.min(intervalMs, Math.max(0, timeoutMs - elapsedMs)));
+  }
 }
 
 // --- MCP Server setup ---
@@ -533,6 +754,53 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: "object", properties: {}, required: [] },
     },
     {
+      name: "get_window_rect",
+      description:
+        "Return a window's screen rectangle as JSON {Title, Pid, Left, Top, Right, Bottom, Width, Height}. Pass a numeric PID or a partial window title. Use to target clicks relative to a window, or to verify a move/resize.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target: { type: "string", description: "Process ID (number) or partial window title string" },
+        },
+        required: ["target"],
+      },
+    },
+    {
+      name: "window_action",
+      description:
+        "Minimize, maximize, restore, or close a window. Pass a numeric PID or partial title. 'close' sends WM_CLOSE — a graceful close the app may still prompt on (e.g. unsaved changes).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target: { type: "string", description: "Process ID (number) or partial window title string" },
+          action: { type: "string", enum: ["minimize", "maximize", "restore", "close"], description: "Action to perform" },
+        },
+        required: ["target", "action"],
+      },
+    },
+    {
+      name: "set_window_bounds",
+      description:
+        "Move and/or resize a window. Pass a numeric PID or partial title plus any of x, y, width, height; omitted dimensions keep their current value. Coordinates are absolute screen pixels.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target: { type: "string", description: "Process ID (number) or partial window title string" },
+          x:      { type: "number", description: "New left edge (omit to keep current)" },
+          y:      { type: "number", description: "New top edge (omit to keep current)" },
+          width:  { type: "number", description: "New width (omit to keep current)" },
+          height: { type: "number", description: "New height (omit to keep current)" },
+        },
+        required: ["target"],
+      },
+    },
+    {
+      name: "list_monitors",
+      description:
+        "Return a JSON array of monitors, each {device, primary, x, y, width, height, dpi, scale}. Coordinates are virtual-desktop pixels (secondary monitors can have negative x/y); scale is the percentage where 100 = no scaling. Use to map a multi-monitor layout before capturing or clicking.",
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
       name: "screenshot_region",
       description: "Capture a rectangular region of the screen and return it as a PNG image. Useful for cropping to just the chat area to reduce Vision API token cost.",
       inputSchema: {
@@ -592,8 +860,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "ocr",
       description:
         "Extract text from the screen using the Windows built-in OCR engine. Free, offline, no API cost. " +
-        "Returns JSON {text, lines[]}. Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region. " +
-        "Use as a cheap pre-filter before sending screenshots to Claude Vision — if OCR text is unchanged, skip the Vision call.",
+        "Returns JSON {text, lines[]} where each line has its text plus a bounding box {x, y, width, height} in absolute screen pixels and a words[] array of the same shape. " +
+        "The boxes let you click located text directly (e.g. click a line's center) without a Vision round-trip to re-find it. " +
+        "Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region — box coordinates are absolute either way. " +
+        "Use as a cheap pre-filter before sending screenshots to Claude Vision.",
       inputSchema: {
         type: "object",
         properties: {
@@ -677,6 +947,41 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["ms"],
       },
     },
+    {
+      name: "wait_for_pixel",
+      description:
+        "Poll a screen pixel until it matches a target color (within tolerance) or the timeout elapses. Use instead of a fixed wait to detect a UI state change — e.g. a button turning active or a spinner finishing. Returns JSON {matched, color, elapsedMs}.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          x:          { type: "number", description: "Horizontal pixel coordinate" },
+          y:          { type: "number", description: "Vertical pixel coordinate" },
+          color:      { type: "string", description: "Target color as hex, e.g. \"#2ECC71\"" },
+          timeoutMs:  { type: "number", description: "Max time to wait in ms (default 5000, max 120000)" },
+          intervalMs: { type: "number", description: "Poll interval in ms (default 300)" },
+          tolerance:  { type: "number", description: "Per-channel match tolerance 0–255 (default 10)" },
+        },
+        required: ["x", "y", "color"],
+      },
+    },
+    {
+      name: "wait_for_text",
+      description:
+        "Poll OCR until the given text appears on screen (case-insensitive substring) or the timeout elapses. Returns JSON {matched, elapsedMs, match} where match carries the found line's text and bounding box {x, y, width, height} so you can click it. Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text:       { type: "string", description: "Substring to wait for (case-insensitive)" },
+          timeoutMs:  { type: "number", description: "Max time to wait in ms (default 10000, max 120000)" },
+          intervalMs: { type: "number", description: "Poll interval in ms (default 600)" },
+          x:          { type: "number", description: "Left edge of region (omit for full primary screen)" },
+          y:          { type: "number", description: "Top edge of region" },
+          width:      { type: "number", description: "Width of region in pixels" },
+          height:     { type: "number", description: "Height of region in pixels" },
+        },
+        required: ["text"],
+      },
+    },
   ],
 }));
 
@@ -723,6 +1028,33 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "get_foreground_window": {
         const result = await getForegroundWindow();
+        return { content: [{ type: "text", text: result }] };
+      }
+      case "get_window_rect": {
+        const result = await getWindowRect(String(a.target));
+        return { content: [{ type: "text", text: result }] };
+      }
+      case "window_action": {
+        const action = String(a.action);
+        if (!["minimize", "maximize", "restore", "close"].includes(action)) {
+          throw new Error(`Invalid action: "${action}" (expected minimize|maximize|restore|close)`);
+        }
+        const result = await windowAction(String(a.target), action as "minimize" | "maximize" | "restore" | "close");
+        return { content: [{ type: "text", text: result }] };
+      }
+      case "set_window_bounds": {
+        const x = a.x !== undefined ? requireInt(a.x, "x") : undefined;
+        const y = a.y !== undefined ? requireInt(a.y, "y") : undefined;
+        const width = a.width !== undefined ? requireInt(a.width, "width") : undefined;
+        const height = a.height !== undefined ? requireInt(a.height, "height") : undefined;
+        if (x === undefined && y === undefined && width === undefined && height === undefined) {
+          throw new Error("set_window_bounds requires at least one of x, y, width, height");
+        }
+        const result = await setWindowBounds(String(a.target), x, y, width, height);
+        return { content: [{ type: "text", text: result }] };
+      }
+      case "list_monitors": {
+        const result = await listMonitors();
         return { content: [{ type: "text", text: result }] };
       }
       case "screenshot_region": {
@@ -784,8 +1116,29 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "wait": {
         const ms = Math.min(Math.max(requireFinite(a.ms, "ms"), 0), 60000);
-        await new Promise((resolve) => setTimeout(resolve, ms));
+        await sleep(ms);
         return { content: [{ type: "text", text: `Waited ${ms} ms` }] };
+      }
+      case "wait_for_pixel": {
+        const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
+        const timeoutMs = Math.min(a.timeoutMs !== undefined ? requireFinite(a.timeoutMs, "timeoutMs") : 5000, 120000);
+        const intervalMs = Math.max(a.intervalMs !== undefined ? requireFinite(a.intervalMs, "intervalMs") : 300, 50);
+        const tolerance = a.tolerance !== undefined ? requireInt(a.tolerance, "tolerance") : 10;
+        const result = await waitForPixel(x, y, String(a.color), timeoutMs, intervalMs, tolerance);
+        return { content: [{ type: "text", text: result }] };
+      }
+      case "wait_for_text": {
+        const timeoutMs = Math.min(a.timeoutMs !== undefined ? requireFinite(a.timeoutMs, "timeoutMs") : 10000, 120000);
+        const intervalMs = Math.max(a.intervalMs !== undefined ? requireFinite(a.intervalMs, "intervalMs") : 600, 100);
+        const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
+        const result = hasRegion
+          ? await waitForText(
+              String(a.text), timeoutMs, intervalMs,
+              requireInt(a.x, "x"), requireInt(a.y, "y"),
+              requireInt(a.width, "width"), requireInt(a.height, "height")
+            )
+          : await waitForText(String(a.text), timeoutMs, intervalMs);
+        return { content: [{ type: "text", text: result }] };
       }
       default:
         return {

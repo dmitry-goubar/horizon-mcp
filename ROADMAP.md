@@ -21,9 +21,11 @@ data belong in the application layer, not here — see [ARCHITECTURE.md](ARCHITE
   array). Root-caused and verified against a live Horizon session.
 - ✅ Force UTF-8 PowerShell output so non-ASCII characters in window titles, clipboard, and
   OCR text are no longer mangled.
-- 🔜 ESLint + Prettier with a `lint` script and CI enforcement.
-- 🔜 Stronger error propagation from PowerShell (surface non-terminating errors instead
-  of returning empty output).
+- ✅ ESLint (flat config) + Prettier with `lint`/`format`/`format:check` scripts. Wiring
+  the lint step into `ci.yml` is pending the `workflow` PAT scope (see maintainer notes).
+- ✅ Stronger error propagation from PowerShell: scripts run with `Stop` error action and
+  a call that errors or returns nothing-but-errors is reported instead of silently
+  returning empty output.
 - 💤 **Performance: persistent PowerShell runspace.** Today every tool call spawns a new
   `powershell.exe` and recompiles its inline C# via `Add-Type` (~150–400 ms each). A
   long-lived runspace would cut per-call latency dramatically. Deferred because it is a
@@ -43,20 +45,23 @@ data belong in the application layer, not here — see [ARCHITECTURE.md](ARCHITE
 Each item below changes desktop behavior and needs validation on a real Windows
 session before shipping, so they are planned rather than done.
 
-- 🔜 **OCR with bounding boxes** — return per-line/word coordinates so the model can
-  click located text instead of paying Vision tokens to re-locate it. Highest-leverage
-  capability addition; stays generic.
-- 🔜 **Window-relative coordinates + `get_window_rect`** — target coordinates relative to
-  a window so automations survive resolution and layout changes.
-- 🔜 **`wait_for` helpers** — poll until a pixel color changes or OCR text appears (with a
-  timeout) to replace brittle fixed `wait` calls.
-- 🔜 **Window management verbs** — minimize, maximize, restore, close, move, resize
-  (currently only focus is supported).
+- ✅ **OCR with bounding boxes** — `ocr` returns per-line and per-word coordinates in
+  absolute screen pixels so the model can click located text instead of paying Vision
+  tokens to re-locate it. Stays generic.
+- ✅ **`get_window_rect`** — returns a window's screen rectangle, so automations can target
+  coordinates relative to a window rather than absolute positions.
+- ✅ **`wait_for` helpers** — `wait_for_pixel` (poll until a pixel matches a color) and
+  `wait_for_text` (poll OCR until a substring appears, returning its bounding box),
+  replacing brittle fixed `wait` calls.
+- ✅ **Window management verbs** — `window_action` (minimize/maximize/restore/close) and
+  `set_window_bounds` (move/resize), alongside the existing `focus_window`.
 - 🔜 **Active-window screenshot** — capture just the focused window.
 - 🔜 **Find-image / template match** — locate an icon by reference image as a
   deterministic alternative to Vision.
+- ✅ **Monitor enumeration** (`list_monitors`) — per-screen bounds, primary flag, and
+  DPI/scale.
 - 🔜 Smaller input additions — middle mouse button, separate key down/up primitives,
-  image clipboard get/set, monitor enumeration (resolution/DPI/position).
+  image clipboard get/set.
 - 🔜 **DPI-awareness audit** — validated on a **dual-monitor, 100%-scale** setup: native
   1920×1080 capture (full and region, both screens), cursor round-trips exactly at multiple
   points including both corners, and per-screen capture (`screen=1`) plus `get_pixel_color`

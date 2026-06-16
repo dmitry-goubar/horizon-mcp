@@ -5,6 +5,7 @@ import {
   escapeSendKeys,
   requireFinite,
   requireInt,
+  parseHexColor,
   vkOf,
   parseKeyCombo,
   buildKeyComboLines,
@@ -38,6 +39,15 @@ test("requireInt truncates toward zero", () => {
   assert.equal(requireInt("12.9", "x"), 12);
   assert.equal(requireInt(-3.7, "x"), -3);
   assert.throws(() => requireInt("nope", "y"), /y must be a finite number/);
+});
+
+test("parseHexColor parses with and without a leading hash, rejects malformed input", () => {
+  assert.deepEqual(parseHexColor("#1A2B3C"), { r: 0x1a, g: 0x2b, b: 0x3c });
+  assert.deepEqual(parseHexColor("ffffff"), { r: 255, g: 255, b: 255 });
+  assert.deepEqual(parseHexColor("  #000000 "), { r: 0, g: 0, b: 0 });
+  assert.throws(() => parseHexColor("#fff"), /Invalid hex color/);
+  assert.throws(() => parseHexColor("nothex!"), /Invalid hex color/);
+  assert.throws(() => parseHexColor("12345g"), /Invalid hex color/);
 });
 
 test("vkOf resolves names case-insensitively and rejects unknowns", () => {

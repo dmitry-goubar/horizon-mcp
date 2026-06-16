@@ -11,7 +11,7 @@ horizon-mcp is an **MCP server** that gives Claude screen, mouse, keyboard, and 
 - **Transport:** stdio (the standard for local MCP servers); the MCP client spawns and manages the process.
 - **Companion:** this is the **capability layer** of a two-part system; the companion `horizon-monitor` is the **application layer**. The mechanism-vs-policy split and the rule for where a feature belongs are in [ARCHITECTURE.md](ARCHITECTURE.md) — consult it before adding any app-specific logic here (it does not belong in the server).
 
-The full tool reference lives in [README.md](README.md); do not duplicate it here. The tools, grouped: screen capture (`screenshot`, `screenshot_region`, `get_pixel_color`), mouse (`click`, `double_click`, `scroll`, `move_mouse`, `mouse_drag`), keyboard (`type_text`, `press_key`, `key_combo`, `paste_text`), windows (`list_windows`, `focus_window`, `get_foreground_window`), clipboard (`get_clipboard`, `set_clipboard`), text extraction (`ocr`), and timing (`wait`).
+The full tool reference lives in [README.md](README.md); do not duplicate it here. The tools, grouped: screen capture (`screenshot`, `screenshot_region`, `get_pixel_color`, `list_monitors`), mouse (`click`, `double_click`, `scroll`, `move_mouse`, `mouse_drag`), keyboard (`type_text`, `press_key`, `key_combo`, `paste_text`), windows (`list_windows`, `focus_window`, `get_foreground_window`, `get_window_rect`, `window_action`, `set_window_bounds`), clipboard (`get_clipboard`, `set_clipboard`), text extraction (`ocr`), and timing/synchronization (`wait`, `wait_for_pixel`, `wait_for_text`).
 
 ## Ownership and attribution
 
@@ -26,6 +26,8 @@ npm install
 npm run build      # tsc: src → dist
 npm test           # unit tests (node:test, via tsx)
 npm run typecheck  # type-check without emitting
+npm run lint       # eslint (flat config)
+npm run format     # prettier --write (format:check for a dry run)
 ```
 
 - `src/index.ts` — MCP server: tool definitions, request handlers, and all PowerShell / Win32 execution.

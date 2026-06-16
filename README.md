@@ -229,6 +229,57 @@ Returns: JSON object `{ "Title": <string>, "Pid": <number> }`.
 
 ---
 
+### `get_window_rect`
+
+Returns a window's screen rectangle. Pass a numeric PID or a partial window title. Use it to target clicks relative to a window, or to verify a `set_window_bounds` call.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target` | string | yes | Process ID (number) or partial window title |
+
+Returns: JSON object `{ "Title", "Pid", "Left", "Top", "Right", "Bottom", "Width", "Height" }`, or `"Window not found: …"`.
+
+---
+
+### `window_action`
+
+Minimizes, maximizes, restores, or closes a window.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target` | string | yes | Process ID (number) or partial window title |
+| `action` | string | yes | One of `minimize`, `maximize`, `restore`, `close` |
+
+`close` sends `WM_CLOSE` — a graceful close that the app may still prompt on (e.g. unsaved changes), not a force-kill. Returns: confirmation string, or `"Window not found: …"`.
+
+---
+
+### `set_window_bounds`
+
+Moves and/or resizes a window. Provide any of `x`, `y`, `width`, `height`; omitted dimensions keep their current value (read from the window's existing rectangle).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target` | string | yes | Process ID (number) or partial window title |
+| `x` | number | no | New left edge (omit to keep current) |
+| `y` | number | no | New top edge (omit to keep current) |
+| `width` | number | no | New width (omit to keep current) |
+| `height` | number | no | New height (omit to keep current) |
+
+At least one of `x`/`y`/`width`/`height` is required. Coordinates are absolute screen pixels. Returns: confirmation string, or `"Window not found: …"`.
+
+---
+
+### `list_monitors`
+
+Enumerates the connected monitors with their geometry and scaling. Use it to map a multi-monitor layout before capturing or clicking — secondary monitors can sit at negative coordinates.
+
+No parameters.
+
+Returns: JSON array where each element is `{ "device", "primary", "x", "y", "width", "height", "dpi", "scale" }`. Coordinates are virtual-desktop pixels; `scale` is the percentage (`100` = no scaling, `150` = 150%).
+
+---
+
 ### `screenshot_region`
 
 Captures a rectangular region of the screen and returns it as a PNG image. Use this to crop to just the area of interest (e.g. a chat pane) to reduce Vision token cost.
@@ -305,7 +356,27 @@ Extracts text from the screen using the Windows built-in OCR engine — free, of
 | `width` | number | no | Width of region in pixels |
 | `height` | number | no | Height of region in pixels |
 
-Returns: JSON object `{ "text": <string>, "lines": <string[]> }`. Requires an OCR language pack installed in Windows Settings (English is present by default).
+Returns: a JSON object
+
+```json
+{
+  "text": "full recognized text",
+  "lines": [
+    {
+      "text": "a line of text",
+      "x": 120, "y": 84, "width": 210, "height": 22,
+      "words": [
+        { "text": "a", "x": 120, "y": 85, "width": 12, "height": 18 },
+        { "text": "line", "x": 138, "y": 84, "width": 44, "height": 20 }
+      ]
+    }
+  ]
+}
+```
+
+Each line and word carries a bounding box in **absolute screen pixels** — the region offset is added back, so the coordinates are directly usable with `click`/`move_mouse` (e.g. click a line's center at `x + width/2`, `y + height/2`) without paying Vision tokens to re-locate the text. Requires an OCR language pack installed in Windows Settings (English is present by default).
+
+> Boxes are pixel-accurate at 100% display scale. On a display scaled above 100%, capture and screen coordinates can diverge — see [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -377,6 +448,41 @@ Pauses for a number of milliseconds. Use to let a laggy remote session catch up 
 | `ms` | number | yes | Milliseconds to wait (capped at 60000) |
 
 Returns: confirmation string `"Waited <ms> ms"`.
+
+---
+
+### `wait_for_pixel`
+
+Polls a screen pixel until it matches a target color (within tolerance) or the timeout elapses. Use this instead of a fixed `wait` to react to a UI state change — a button turning active, a spinner finishing, a status dot changing color.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x` | number | yes | Horizontal pixel coordinate |
+| `y` | number | yes | Vertical pixel coordinate |
+| `color` | string | yes | Target color as hex, e.g. `"#2ECC71"` |
+| `timeoutMs` | number | no | Max time to wait (default `5000`, max `120000`) |
+| `intervalMs` | number | no | Poll interval (default `300`) |
+| `tolerance` | number | no | Per-channel match tolerance 0–255 (default `10`) |
+
+Returns: JSON object `{ "matched": <bool>, "color": <hex>, "elapsedMs": <number> }`.
+
+---
+
+### `wait_for_text`
+
+Polls OCR until the given text appears on screen (case-insensitive substring) or the timeout elapses. On a match it returns the found line's bounding box, so you can click it directly.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | yes | Substring to wait for (case-insensitive) |
+| `timeoutMs` | number | no | Max time to wait (default `10000`, max `120000`) |
+| `intervalMs` | number | no | Poll interval (default `600`) |
+| `x` | number | no | Left edge of region (omit for full primary screen) |
+| `y` | number | no | Top edge of region |
+| `width` | number | no | Width of region in pixels |
+| `height` | number | no | Height of region in pixels |
+
+Returns: JSON object `{ "matched": <bool>, "elapsedMs": <number>, "match": { "text", "x", "y", "width", "height" } | null }`.
 
 ---
 

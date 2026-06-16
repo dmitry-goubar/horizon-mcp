@@ -28,6 +28,15 @@ export function requireFinite(v, name) {
 export function requireInt(v, name) {
     return Math.trunc(requireFinite(v, name));
 }
+/** Parse a hex color (`"#1A2B3C"` or `"1a2b3c"`) into RGB. Throws on malformed input. */
+export function parseHexColor(hex) {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(String(hex).trim());
+    if (!m) {
+        throw new Error(`Invalid hex color: ${JSON.stringify(hex)} (expected RRGGBB)`);
+    }
+    const n = parseInt(m[1], 16);
+    return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
+}
 // Virtual-key codes for keybd_event (case-insensitive lookup).
 // Unlike SendKeys, keybd_event can send the real Windows key and any chord,
 // which is required to drive a remote Horizon session (Win+R, Alt+Tab,

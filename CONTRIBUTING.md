@@ -14,6 +14,8 @@ npm install
 npm run build      # tsc: src → dist
 npm test           # run the unit tests
 npm run typecheck  # type-check without emitting
+npm run lint       # eslint (run before opening a PR)
+npm run format     # prettier --write (format:check for a dry run)
 ```
 
 ## Project layout
@@ -63,6 +65,6 @@ body explaining what changed and why.
 
 ## Pull requests
 
-Before opening a PR, make sure `npm run build`, `npm test`, and `npm run typecheck` all
-pass and that `dist/` is in sync. Describe the change and its rationale, and update the
-README and CHANGELOG when behavior changes.
+Before opening a PR, make sure `npm run build`, `npm test`, `npm run typecheck`, and
+`npm run lint` all pass and that `dist/` is in sync. Describe the change and its
+rationale, and update the README and CHANGELOG when behavior changes.
