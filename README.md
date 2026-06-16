@@ -203,7 +203,13 @@ Returns: JSON array where each element has `Id` (process ID), `Name` (process na
 
 ### `focus_window`
 
-Brings a window to the foreground by process ID or title substring.
+Brings a window to the foreground by process ID or title substring, restoring it
+if minimized and forcing it above other windows (including topmost ones). It works
+around the Windows foreground lock — which otherwise lets a background process give
+a window focus without actually raising it — by briefly attaching to the current
+foreground thread's input queue and toggling the window's Z-order to the top. This
+matters when capturing or driving the Horizon client while other apps are open: a
+plain focus call can leave another window covering it.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

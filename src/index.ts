@@ -173,12 +173,39 @@ using System; using System.Runtime.InteropServices;
 public class Win {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+
+  static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+  static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+  const uint SWP_NOMOVE = 0x2, SWP_NOSIZE = 0x1, SWP_SHOWWINDOW = 0x40;
+
+  // SetForegroundWindow from a background process is refused by the Windows
+  // foreground lock, so the window gets focus but is not raised above an active
+  // or topmost window. Defeat both: borrow the current foreground thread's input
+  // queue (AttachThreadInput) so the call is honoured, and force Z-order to the
+  // top via a TOPMOST then NOTOPMOST toggle so it ends up above other windows
+  // without staying always-on-top.
+  public static void ForceForeground(IntPtr h) {
+    ShowWindow(h, 9); // SW_RESTORE — un-minimize if needed
+    uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+    uint thisThread = GetCurrentThreadId();
+    bool attached = (fgThread != thisThread) && AttachThreadInput(fgThread, thisThread, true);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+    SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    if (attached) AttachThreadInput(fgThread, thisThread, false);
+  }
 }
 "@
 $p = Get-Process | ${selector} | Select-Object -First 1
 if ($p) {
-  [Win]::ShowWindow($p.MainWindowHandle, 9)
-  [Win]::SetForegroundWindow($p.MainWindowHandle)
+  [Win]::ForceForeground($p.MainWindowHandle)
   "Focused: $($p.MainWindowTitle)"
 } else { "Window not found: ${pidOrTitle}" }
 `);
@@ -488,7 +515,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "focus_window",
       description:
-        "Bring a window to the foreground. Pass a numeric process ID or a partial window title (case-insensitive).",
+        "Bring a window to the foreground, forcing it above other (including topmost) windows and restoring it if minimized. Pass a numeric process ID or a partial window title (case-insensitive).",
       inputSchema: {
         type: "object",
         properties: {
