@@ -57,11 +57,14 @@ session before shipping, so they are planned rather than done.
   deterministic alternative to Vision.
 - 🔜 Smaller input additions — middle mouse button, separate key down/up primitives,
   image clipboard get/set, monitor enumeration (resolution/DPI/position).
-- 🔜 **DPI-awareness audit** — the primary monitor is validated: native 1920×1080 capture
-  (full and region), and `SetCursorPos` round-trips exactly at multiple points including
-  both corners, so capture and input share a 1:1 coordinate space at 100% scale. Still to
-  verify: scaled (>100%) displays and mixed-DPI multi-monitor setups, which can virtualize
-  coordinates — document or fix any mismatch there.
+- 🔜 **DPI-awareness audit** — validated on a **dual-monitor, 100%-scale** setup: native
+  1920×1080 capture (full and region, both screens), cursor round-trips exactly at multiple
+  points including both corners, and per-screen capture (`screen=1`) plus `get_pixel_color`
+  read the secondary monitor pixel-exactly at **negative virtual-desktop coordinates**
+  (`-1920..0`) — so capture and input share a 1:1 coordinate space across monitors at 100%.
+  Still to verify: scaled (>100%) displays and **mixed-DPI** multi-monitor setups (monitors
+  at different scales), which can virtualize coordinates — document or fix any mismatch
+  there. Not reproducible on current hardware (both displays are 96 DPI / 100%).
 
 ## Documentation
 
