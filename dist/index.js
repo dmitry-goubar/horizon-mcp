@@ -86,7 +86,27 @@ $gfx.Dispose(); $bmp.Dispose()
     }
 }
 // Move cursor and click via user32.dll
-async function mouseClick(x, y, button, double_) {
+// Mouse coordinates live in the *virtual desktop*, where a monitor left of the
+// primary starts at a negative X. `screenshot screen=N`, by contrast, returns that
+// monitor's image with a local 0,0 origin — so a point read off a screenshot must be
+// shifted by the monitor's virtual origin before SetCursorPos, or the cursor lands on
+// the wrong monitor. This emits PowerShell setting $cx/$cy to the absolute position:
+// with `screen`, (x,y) are local to AllScreens[screen] and its Bounds offset is added
+// (matching the screenshot frame); without it, (x,y) are absolute virtual coordinates.
+function resolveCursorPs(x, y, screen) {
+    if (screen === undefined)
+        return `$cx = ${x}; $cy = ${y}`;
+    return `Add-Type -AssemblyName System.Windows.Forms
+$__b = [System.Windows.Forms.Screen]::AllScreens[${screen}].Bounds
+$cx = $__b.X + (${x}); $cy = $__b.Y + (${y})`;
+}
+// Shared schema description for the optional `screen` param on the mouse tools.
+const SCREEN_PARAM_DESC = "Monitor index the coordinates are relative to — pass the SAME index you gave " +
+    "`screenshot` so the click lands on the right monitor (on multi-monitor setups a " +
+    "left-of-primary monitor has a negative virtual X). Omit only if x,y are already " +
+    "absolute virtual-desktop coordinates.";
+// Move cursor and click via user32.dll
+async function mouseClick(x, y, button, double_, screen) {
     const down = button === "left" ? "0x0002" : "0x0008";
     const up = button === "left" ? "0x0004" : "0x0010";
     const clicks = double_
@@ -100,7 +120,8 @@ public class Mouse {
   [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);
 }
 "@
-[Mouse]::SetCursorPos(${x}, ${y}); Start-Sleep -Milliseconds 80
+${resolveCursorPs(x, y, screen)}
+[Mouse]::SetCursorPos($cx, $cy); Start-Sleep -Milliseconds 80
 ${clicks}
 `);
 }
@@ -367,7 +388,7 @@ ConvertTo-Json -Compress @{ R = $r; G = $g; B = $b; Hex = ("#{0:X2}{1:X2}{2:X2}"
 `);
 }
 // Scroll the mouse wheel at (x, y)
-async function scroll(x, y, direction, amount) {
+async function scroll(x, y, direction, amount, screen) {
     const delta = direction === "up" ? amount * 120 : -(amount * 120);
     await ps(`
 Add-Type @"
@@ -377,7 +398,8 @@ public class ScrollUtil {
   [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);
 }
 "@
-[ScrollUtil]::SetCursorPos(${x}, ${y}); Start-Sleep -Milliseconds 50
+${resolveCursorPs(x, y, screen)}
+[ScrollUtil]::SetCursorPos($cx, $cy); Start-Sleep -Milliseconds 50
 [ScrollUtil]::mouse_event(0x0800, 0, 0, ${delta}, 0)
 `);
 }
@@ -499,7 +521,10 @@ public class KbdV {
 }
 "@
 Set-Clipboard -Value '${safe}'
-Start-Sleep -Milliseconds 60
+# 500ms (not a few ms): inside a Horizon/RDP session, Ctrl+V pastes the *remote*
+# clipboard, which lags the local one by the redirection sync interval — too short a
+# wait pastes stale remote-clipboard content instead of this text.
+Start-Sleep -Milliseconds 500
 [KbdV]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)  # Ctrl down
 [KbdV]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero)  # V down
 [KbdV]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero)  # V up
@@ -507,20 +532,28 @@ Start-Sleep -Milliseconds 60
 `);
 }
 // Move the cursor without clicking (hover for menus/tooltips).
-async function moveMouse(x, y) {
+async function moveMouse(x, y, screen) {
     await ps(`
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public class MouseMv { [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); }
 "@
-[MouseMv]::SetCursorPos(${x}, ${y})
+${resolveCursorPs(x, y, screen)}
+[MouseMv]::SetCursorPos($cx, $cy)
 `);
 }
 // Press at (x1,y1), drag to (x2,y2) in small steps, release. Steps are needed
 // so the target app registers a real drag (dragging windows, selecting text).
-async function mouseDrag(x1, y1, x2, y2, button) {
+async function mouseDrag(x1, y1, x2, y2, button, screen) {
     const down = button === "left" ? "0x0002" : "0x0008";
     const up = button === "left" ? "0x0004" : "0x0010";
+    // Resolve a per-monitor offset ($ox,$oy) once and apply it to both endpoints, so a
+    // drag described in `screen`-local coordinates lands on the right monitor.
+    const offset = screen === undefined
+        ? `$ox = 0; $oy = 0`
+        : `Add-Type -AssemblyName System.Windows.Forms
+$__b = [System.Windows.Forms.Screen]::AllScreens[${screen}].Bounds
+$ox = $__b.X; $oy = $__b.Y`;
     await ps(`
 Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -529,12 +562,14 @@ public class MouseDr {
   [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);
 }
 "@
-[MouseDr]::SetCursorPos(${x1}, ${y1}); Start-Sleep -Milliseconds 60
+${offset}
+$x1 = $ox + (${x1}); $y1 = $oy + (${y1}); $x2 = $ox + (${x2}); $y2 = $oy + (${y2})
+[MouseDr]::SetCursorPos($x1, $y1); Start-Sleep -Milliseconds 60
 [MouseDr]::mouse_event(${down}, 0, 0, 0, 0); Start-Sleep -Milliseconds 60
 $steps = 24
 for ($i = 1; $i -le $steps; $i++) {
-  $nx = [int](${x1} + (${x2} - ${x1}) * $i / $steps)
-  $ny = [int](${y1} + (${y2} - ${y1}) * $i / $steps)
+  $nx = [int]($x1 + ($x2 - $x1) * $i / $steps)
+  $ny = [int]($y1 + ($y2 - $y1) * $i / $steps)
   [MouseDr]::SetCursorPos($nx, $ny); Start-Sleep -Milliseconds 10
 }
 Start-Sleep -Milliseconds 60
@@ -612,7 +647,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         {
             name: "click",
-            description: "Move the mouse to (x, y) and click.",
+            description: "Move the mouse to (x, y) and click. On multi-monitor setups pass `screen` (the same index you screenshotted) so the click hits the right monitor.",
             inputSchema: {
                 type: "object",
                 properties: {
@@ -623,18 +658,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                         enum: ["left", "right"],
                         description: "Mouse button (default: left)",
                     },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x", "y"],
             },
         },
         {
             name: "double_click",
-            description: "Double-click at (x, y) — use this to open apps or files.",
+            description: "Double-click at (x, y) — use this to open apps or files. Pass `screen` (same index you screenshotted) on multi-monitor setups.",
             inputSchema: {
                 type: "object",
                 properties: {
                     x: { type: "number" },
                     y: { type: "number" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x", "y"],
             },
@@ -764,6 +801,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     y: { type: "number", description: "Vertical pixel coordinate to scroll at" },
                     direction: { type: "string", enum: ["up", "down"], description: "Scroll direction" },
                     amount: { type: "number", description: "Number of notches to scroll (default: 3)" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x", "y", "direction"],
             },
@@ -842,13 +880,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                 properties: {
                     x: { type: "number", description: "Horizontal pixel coordinate" },
                     y: { type: "number", description: "Vertical pixel coordinate" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x", "y"],
             },
         },
         {
             name: "mouse_drag",
-            description: "Press at (x1, y1), drag to (x2, y2), and release. Use to drag windows, select text, or resize.",
+            description: "Press at (x1, y1), drag to (x2, y2), and release. Use to drag windows, select text, or resize. Pass `screen` (same index you screenshotted) on multi-monitor setups.",
             inputSchema: {
                 type: "object",
                 properties: {
@@ -857,6 +896,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     x2: { type: "number", description: "End horizontal pixel coordinate" },
                     y2: { type: "number", description: "End vertical pixel coordinate" },
                     button: { type: "string", enum: ["left", "right"], description: "Mouse button to hold during the drag (default: left)" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x1", "y1", "x2", "y2"],
             },
@@ -921,12 +961,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             }
             case "click": {
                 const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
-                await mouseClick(x, y, a.button ?? "left", false);
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                await mouseClick(x, y, a.button ?? "left", false, screen);
                 return { content: [{ type: "text", text: `Clicked (${x}, ${y})` }] };
             }
             case "double_click": {
                 const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
-                await mouseClick(x, y, "left", true);
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                await mouseClick(x, y, "left", true, screen);
                 return {
                     content: [{ type: "text", text: `Double-clicked (${x}, ${y})` }],
                 };
@@ -989,7 +1031,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             case "scroll": {
                 const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
                 const amount = a.amount !== undefined ? requireInt(a.amount, "amount") : 3;
-                await scroll(x, y, a.direction, amount);
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                await scroll(x, y, a.direction, amount, screen);
                 return { content: [{ type: "text", text: `Scrolled ${a.direction} ${amount} notch(es) at (${x}, ${y})` }] };
             }
             case "get_clipboard": {
@@ -1020,13 +1063,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             }
             case "move_mouse": {
                 const x = requireInt(a.x, "x"), y = requireInt(a.y, "y");
-                await moveMouse(x, y);
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                await moveMouse(x, y, screen);
                 return { content: [{ type: "text", text: `Moved to (${x}, ${y})` }] };
             }
             case "mouse_drag": {
                 const x1 = requireInt(a.x1, "x1"), y1 = requireInt(a.y1, "y1");
                 const x2 = requireInt(a.x2, "x2"), y2 = requireInt(a.y2, "y2");
-                await mouseDrag(x1, y1, x2, y2, a.button ?? "left");
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                await mouseDrag(x1, y1, x2, y2, a.button ?? "left", screen);
                 return { content: [{ type: "text", text: `Dragged (${x1}, ${y1}) → (${x2}, ${y2})` }] };
             }
             case "wait": {

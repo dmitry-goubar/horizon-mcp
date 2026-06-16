@@ -147,8 +147,11 @@ Moves the cursor to a pixel coordinate and clicks.
 | `x` | number | yes | Horizontal pixel coordinate |
 | `y` | number | yes | Vertical pixel coordinate |
 | `button` | string | no | `"left"` (default) or `"right"` |
+| `screen` | number | no | Monitor index the coordinates are relative to — pass the **same index you gave `screenshot`** (see note below) |
 
 Returns: confirmation string `"Clicked (x, y)"`.
+
+> **Multi-monitor coordinates.** The cursor lives in the *virtual desktop*, where a monitor to the left of the primary starts at a **negative** X. But `screenshot screen=N` returns that monitor's image with a local `0,0` origin. So a point read off a screenshot of monitor N must be paired with `screen: N` on the click — the server then adds monitor N's virtual offset, and the click lands where the screenshot showed it. Omit `screen` only when `x,y` are already absolute virtual-desktop coordinates. The same `screen` parameter applies to `double_click`, `scroll`, `move_mouse`, and `mouse_drag`.
 
 ---
 
@@ -156,10 +159,11 @@ Returns: confirmation string `"Clicked (x, y)"`.
 
 Double-clicks at a pixel coordinate. Use this to open applications, files, or folders.
 
-| Parameter | Type | Required |
-|-----------|------|----------|
-| `x` | number | yes |
-| `y` | number | yes |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `x` | number | yes | Horizontal pixel coordinate |
+| `y` | number | yes | Vertical pixel coordinate |
+| `screen` | number | no | Monitor index for `x,y` (see [`click`](#click)) |
 
 Returns: confirmation string `"Double-clicked (x, y)"`.
 
@@ -318,6 +322,7 @@ Scrolls the mouse wheel at a coordinate. Use to move through chat history or lon
 | `y` | number | yes | Vertical pixel coordinate to scroll at |
 | `direction` | string | yes | `"up"` or `"down"` |
 | `amount` | number | no | Number of wheel notches (default: 3) |
+| `screen` | number | no | Monitor index for `x,y` (see [`click`](#click)) |
 
 Returns: confirmation string `"Scrolled <direction> <amount> notch(es) at (x, y)"`.
 
@@ -406,6 +411,8 @@ Places text on the clipboard and pastes it with `Ctrl+V`. More reliable than `ty
 
 Returns: confirmation string `"Pasted via clipboard"`.
 
+> **Remote-session timing:** inside a Horizon/RDP session, `Ctrl+V` pastes the *remote* clipboard, which lags the local one by the redirection sync interval. The tool waits ~500 ms after setting the clipboard before pasting so the text has synced across — otherwise stale remote-clipboard content would be pasted instead.
+>
 > **Security:** the value remains on the clipboard after pasting. For passwords or other secrets, follow up with `set_clipboard` set to an empty string to clear it.
 
 ---
@@ -418,6 +425,7 @@ Moves the cursor to a coordinate without clicking. Use to hover over menus or tr
 |-----------|------|----------|-------------|
 | `x` | number | yes | Horizontal pixel coordinate |
 | `y` | number | yes | Vertical pixel coordinate |
+| `screen` | number | no | Monitor index for `x,y` (see [`click`](#click)) |
 
 Returns: confirmation string `"Moved to (x, y)"`.
 
@@ -434,6 +442,7 @@ Presses at a start point, drags to an end point in small steps, and releases. Us
 | `x2` | number | yes | End horizontal pixel coordinate |
 | `y2` | number | yes | End vertical pixel coordinate |
 | `button` | string | no | `"left"` (default) or `"right"` |
+| `screen` | number | no | Monitor index for the coordinates (see [`click`](#click)) |
 
 Returns: confirmation string `"Dragged (x1, y1) → (x2, y2)"`.
 
@@ -535,7 +544,9 @@ To launch a **published app from the Horizon catalog** instead, `screenshot` the
 
 ## Troubleshooting
 
-**Clicks or screenshots land in the wrong place.** On displays with a scaling factor above 100% (or mixed-DPI multi-monitor setups), screen coordinates can be reported in a different space than where input is delivered. Set the affected app — or Windows display scaling — to 100% to confirm, and prefer coordinates read from a fresh `screenshot` at the current scaling.
+**Clicks land on the wrong monitor.** If you `screenshot screen=N` and then `click` a point read off that image *without* passing `screen: N`, the click goes to that coordinate on the **primary** monitor instead — a monitor left of the primary starts at a negative virtual X, so its screenshot's local `0,0` is not the desktop's `0,0`. Pass the same `screen` index to `click`/`double_click`/`scroll`/`move_mouse`/`mouse_drag` that you gave `screenshot` (see [`click`](#click)); use `list_monitors` to inspect the layout.
+
+**Clicks or screenshots land slightly off.** On displays with a scaling factor above 100% (or mixed-DPI multi-monitor setups), screen coordinates can be reported in a different space than where input is delivered. Set the affected app — or Windows display scaling — to 100% to confirm, and prefer coordinates read from a fresh `screenshot` at the current scaling.
 
 **`ocr` returns an error about a language pack.** The Windows built-in OCR engine needs a recognition language installed. Add one under *Settings → Time & language → Language & region → (your language) → Language options → install the optional OCR component*, then retry.
 
