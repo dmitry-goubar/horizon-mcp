@@ -125,3 +125,80 @@ export function buildKeyEventLine(key: string, isDown: boolean): string {
   const flags = (VK_EXTENDED.has(vk) ? 1 : 0) | (isDown ? 0 : 2);
   return `[Kbd]::keybd_event(${vk}, 0, ${flags}, [UIntPtr]::Zero)`;
 }
+
+export interface KeyStroke {
+  vk: number;
+  shift: boolean;
+}
+
+// Shifted top-row digits and OEM punctuation on a US (ENG) keyboard layout.
+const SHIFTED_DIGIT: Record<string, number> = {
+  ")": 0x30, "!": 0x31, "@": 0x32, "#": 0x33, "$": 0x34,
+  "%": 0x35, "^": 0x36, "&": 0x37, "*": 0x38, "(": 0x39,
+};
+const OEM_CHARS: Record<string, [number, boolean]> = {
+  ";": [0xba, false], ":": [0xba, true],
+  "=": [0xbb, false], "+": [0xbb, true],
+  ",": [0xbc, false], "<": [0xbc, true],
+  "-": [0xbd, false], "_": [0xbd, true],
+  ".": [0xbe, false], ">": [0xbe, true],
+  "/": [0xbf, false], "?": [0xbf, true],
+  "`": [0xc0, false], "~": [0xc0, true],
+  "[": [0xdb, false], "{": [0xdb, true],
+  "\\": [0xdc, false], "|": [0xdc, true],
+  "]": [0xdd, false], "}": [0xdd, true],
+  "'": [0xde, false], '"': [0xde, true],
+};
+
+/**
+ * Map a single character to its US-layout virtual-key code and whether Shift is held.
+ * type_text drives keybd_event with this — the same low-level path key_combo/paste use,
+ * which reaches locked-down/remote sessions where SendKeys does not. Returns null for
+ * characters not on the US layout (accented/non-ASCII) and for "\r" (so a "\r\n" pair
+ * yields a single Enter); callers skip nulls.
+ */
+export function charToStroke(ch: string): KeyStroke | null {
+  if (ch.length !== 1) return null; // surrogate-pair code points etc.
+  if (ch >= "a" && ch <= "z") return { vk: ch.charCodeAt(0) - 32, shift: false }; // VK = uppercase
+  if (ch >= "A" && ch <= "Z") return { vk: ch.charCodeAt(0), shift: true };
+  if (ch >= "0" && ch <= "9") return { vk: ch.charCodeAt(0), shift: false };
+  if (ch === " ") return { vk: 0x20, shift: false };
+  if (ch === "\t") return { vk: 0x09, shift: false };
+  if (ch === "\n") return { vk: 0x0d, shift: false };
+  if (ch in SHIFTED_DIGIT) return { vk: SHIFTED_DIGIT[ch], shift: true };
+  if (ch in OEM_CHARS) return { vk: OEM_CHARS[ch][0], shift: OEM_CHARS[ch][1] };
+  return null;
+}
+
+/**
+ * Build the keybd_event statement lines to TYPE `text` one character at a time, holding
+ * Shift around characters that need it, with `delayMs` between characters so the remote
+ * (laptop -> Horizon -> session) keeps up. Characters not on the US layout are skipped.
+ * Emits only integers, so there is no script injection. Pairs with the [Kbd] Add-Type
+ * wrapper in index.ts.
+ */
+export function buildTypeLines(text: string, delayMs: number, holdMs = 0): string[] {
+  // Supply the real hardware scan code (MapVirtualKey), not 0. Horizon forwards
+  // keyboard input to the remote by SCAN CODE; a keybd_event with bScan=0 is dropped
+  // for bare alphanumeric/space keys (field-tested), while keys with a modifier or OEM
+  // keys happened to get through. Only the integer VK is interpolated, so no injection.
+  const ev = (vk: number, up: boolean) =>
+    `[Kbd]::keybd_event(${vk}, [byte]([Kbd]::MapVirtualKey(${vk}, 0)), ${(VK_EXTENDED.has(vk) ? 1 : 0) | (up ? 2 : 0)}, [UIntPtr]::Zero)`;
+  const sleep = (ms: number) => `Start-Sleep -Milliseconds ${Math.floor(ms)}`;
+  const SHIFT = 0x10;
+  const lines: string[] = [];
+  for (const ch of text) {
+    const s = charToStroke(ch);
+    if (!s) continue; // not representable on the US layout — skip
+    if (s.shift) lines.push(ev(SHIFT, false));
+    lines.push(ev(s.vk, false));
+    // Hold the key down briefly before releasing. A zero-duration press (down+up in
+    // the same instant) is dropped by the remote Horizon input pipeline for simple
+    // keys; a short hold makes each keystroke register reliably.
+    if (holdMs > 0) lines.push(sleep(holdMs));
+    lines.push(ev(s.vk, true));
+    if (s.shift) lines.push(ev(SHIFT, true));
+    if (delayMs > 0) lines.push(sleep(delayMs));
+  }
+  return lines;
+}

@@ -10,13 +10,13 @@ import { promisify } from "util";
 import { createRequire } from "node:module";
 import {
   escapePsSingleQuote,
-  escapeSendKeys,
   requireFinite,
   requireInt,
   parseHexColor,
   parseKeyCombo,
   buildKeyComboLines,
   buildKeyEventLine,
+  buildTypeLines,
 } from "./input.js";
 
 const require = createRequire(import.meta.url);
@@ -168,25 +168,31 @@ ${clicks}
 `);
 }
 
-// Type text via SendKeys, one character at a time. SendWait on the whole string at
-// once drops characters when the target is a remote Horizon session, and even a fast
-// per-char burst is dropped by a remote *secure logon* field — the input travels
-// laptop -> Horizon -> remote session, so each keystroke needs time to land. A pause
-// BEFORE each keystroke lets the field settle and receive it; field-tested that 30ms
-// was too short for a logon screen (a 13-char password arrived as ~4 chars), so this
-// is generous. Each SendWait is wrapped so one problematic character cannot abort the
-// rest of the string (the ps() wrapper otherwise stops on the first error). For long
-// or multi-line text, prefer paste_text (clipboard), which is a single event.
-const TYPE_CHAR_DELAY_MS = 120;
+// Type text via keybd_event (raw virtual-key codes), one character at a time, holding
+// Shift around characters that need it. This is the SAME low-level input path key_combo
+// and paste_text use — field-tested to reach locked-down/remote Horizon sessions where
+// the SendKeys path is silently dropped (a 13-char password typed via SendKeys arrived
+// as ~4 chars; clicks and keybd_event chords always worked). The character -> VK+Shift
+// mapping (US layout) and statement generation live in input.ts and are unit-tested; only
+// integers are emitted, so there is no script injection. Characters not on the US layout
+// are skipped. A small delay between characters lets the remote keep up. For long or
+// multi-line text, paste_text (clipboard) is still preferable — it is a single event.
+const TYPE_CHAR_DELAY_MS = 60;
+const TYPE_HOLD_MS = 30;
 async function sendText(text: string): Promise<void> {
   if (!text) return;
-  // Spread by code point (handles surrogate pairs); escape each char for SendKeys,
-  // then embed in a PS single-quoted literal (fully literal — no $/backtick expansion).
-  const lines = [...text].map((ch) => {
-    const lit = escapePsSingleQuote(escapeSendKeys(ch));
-    return `Start-Sleep -Milliseconds ${TYPE_CHAR_DELAY_MS}; try { [System.Windows.Forms.SendKeys]::SendWait('${lit}') } catch {}`;
-  });
-  await ps("Add-Type -AssemblyName System.Windows.Forms\n" + lines.join("\n"));
+  const lines = buildTypeLines(text, TYPE_CHAR_DELAY_MS, TYPE_HOLD_MS);
+  if (lines.length === 0) return;
+  await ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class Kbd {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+}
+"@
+${lines.join("\n")}
+`);
 }
 
 // Press a named key (Enter, Escape, Tab, etc.)

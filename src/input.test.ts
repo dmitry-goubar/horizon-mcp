@@ -10,6 +10,8 @@ import {
   parseKeyCombo,
   buildKeyComboLines,
   buildKeyEventLine,
+  charToStroke,
+  buildTypeLines,
   VK_EXTENDED,
 } from "./input.js";
 
@@ -118,4 +120,49 @@ test("VK_EXTENDED contains the navigation/Win keys that require the extended fla
 
 test("buildKeyComboLines rejects an empty chord", () => {
   assert.throws(() => buildKeyComboLines([], 1, 0), /requires at least one key/);
+});
+
+test("charToStroke maps US-layout characters to VK + shift, null for the rest", () => {
+  assert.deepEqual(charToStroke("a"), { vk: 0x41, shift: false }); // VK is uppercase
+  assert.deepEqual(charToStroke("A"), { vk: 0x41, shift: true });
+  assert.deepEqual(charToStroke("5"), { vk: 0x35, shift: false });
+  assert.deepEqual(charToStroke("%"), { vk: 0x35, shift: true });  // Shift+5
+  assert.deepEqual(charToStroke("$"), { vk: 0x34, shift: true });  // Shift+4
+  assert.deepEqual(charToStroke("_"), { vk: 0xbd, shift: true });  // Shift+-
+  assert.deepEqual(charToStroke("/"), { vk: 0xbf, shift: false });
+  assert.deepEqual(charToStroke(" "), { vk: 0x20, shift: false });
+  assert.deepEqual(charToStroke("\n"), { vk: 0x0d, shift: false });
+  assert.equal(charToStroke("\r"), null);   // dropped so \r\n -> single Enter
+  assert.equal(charToStroke("é"), null);     // not on the US layout
+});
+
+test("buildTypeLines holds Shift around shifted chars and paces with a delay", () => {
+  // "Aa" -> Shift down, A down, A up, Shift up, sleep, a down, a up, sleep (holdMs=0)
+  const lines = buildTypeLines("Aa", 25, 0);
+  assert.match(lines[0], /keybd_event\(16, .*, 0, \[UIntPtr\]::Zero\)/); // Shift down (VK 0x10)
+  assert.match(lines[1], /keybd_event\(65, .*, 0, \[UIntPtr\]::Zero\)/); // A down
+  assert.match(lines[2], /keybd_event\(65, .*, 2, \[UIntPtr\]::Zero\)/); // A up (KEYUP=2)
+  assert.match(lines[3], /keybd_event\(16, .*, 2, \[UIntPtr\]::Zero\)/); // Shift up
+  assert.match(lines[4], /Start-Sleep -Milliseconds 25/);
+  assert.match(lines[5], /keybd_event\(65, .*, 0, \[UIntPtr\]::Zero\)/); // a down (no shift)
+  assert.equal(lines.filter((l) => /Start-Sleep/.test(l)).length, 2); // one per char
+
+  // a hold inserts a sleep between each key's down and up
+  const held = buildTypeLines("a", 0, 15);
+  assert.match(held[0], /keybd_event\(65, .*, 0,/);          // a down
+  assert.match(held[1], /Start-Sleep -Milliseconds 15/);     // hold
+  assert.match(held[2], /keybd_event\(65, .*, 2,/);          // a up
+
+  // unmapped characters are skipped entirely
+  assert.equal(buildTypeLines("é", 0).length, 0);
+
+  // only integer VK codes are interpolated (vk + MapVirtualKey arg); no user strings
+  for (const l of buildTypeLines("xY$/", 0)) {
+    if (l.startsWith("[Kbd]")) {
+      assert.match(
+        l,
+        /^\[Kbd\]::keybd_event\(\d+, \[byte\]\(\[Kbd\]::MapVirtualKey\(\d+, 0\)\), \d+, \[UIntPtr\]::Zero\)$/
+      );
+    }
+  }
 });
