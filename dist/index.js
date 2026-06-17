@@ -2,13 +2,13 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import { createRequire } from "node:module";
 import { escapePsSingleQuote, escapeSendKeys, requireFinite, requireInt, parseHexColor, parseKeyCombo, buildKeyComboLines, } from "./input.js";
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Maximum time a single PowerShell invocation may run before it is killed, so a
 // hung call cannot block the server indefinitely.
@@ -31,7 +31,10 @@ async function ps(script) {
         script;
     const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
     try {
-        const { stdout, stderr } = await execAsync(`powershell -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, { maxBuffer: 50 * 1024 * 1024, windowsHide: true, timeout: PS_TIMEOUT_MS, encoding: "utf8" });
+        // Use execFile, not exec: exec routes through cmd.exe (≈8191-char command-line
+        // limit), which a long Base64 script (e.g. the OCR pipeline) can exceed. execFile
+        // spawns powershell directly, raising the limit to CreateProcess's ≈32767 chars.
+        const { stdout, stderr } = await execFileAsync("powershell.exe", ["-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", encoded], { maxBuffer: 50 * 1024 * 1024, windowsHide: true, timeout: PS_TIMEOUT_MS, encoding: "utf8" });
         const out = stdout.trim();
         const errText = stderr.trim();
         // Exit was 0. If the script produced no output but did write to the error

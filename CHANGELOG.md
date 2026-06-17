@@ -40,6 +40,10 @@ All notable changes to this project are documented here. The format is based on
 - The server version is read from `package.json` rather than being hardcoded.
 
 ### Hardened
+- PowerShell is now spawned with `execFile` instead of `exec`, so commands no longer pass
+  through `cmd.exe` and its ~8191-character command-line limit. A long Base64-encoded
+  script (notably the OCR pipeline) previously failed with "The command line is too long";
+  the limit is now CreateProcess's ~32767 characters. Found during live validation.
 - Each PowerShell invocation now runs under a timeout so a hung call cannot block the
   server indefinitely.
 - The server exits at startup with a clear message when run on a non-Windows platform.
