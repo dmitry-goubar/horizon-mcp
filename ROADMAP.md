@@ -62,8 +62,8 @@ session before shipping, so they are planned rather than done.
   alternative to Vision for exact-pixel icons.
 - ✅ **Monitor enumeration** (`list_monitors`) — per-screen bounds, primary flag, and
   DPI/scale.
-- 🔜 Smaller input additions — middle mouse button, separate key down/up primitives,
-  image clipboard get/set.
+- ✅ Smaller input additions — middle mouse button (`click`/`mouse_drag`), `key_down`/`key_up`
+  primitives, and image clipboard get/set (`get_clipboard_image`/`set_clipboard_image`).
 - 🔜 **DPI-awareness audit** — validated on a **dual-monitor, 100%-scale** setup: native
   1920×1080 capture (full and region, both screens), cursor round-trips exactly at multiple
   points including both corners, and per-screen capture (`screen=1`) plus `get_pixel_color`

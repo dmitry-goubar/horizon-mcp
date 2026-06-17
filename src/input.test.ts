@@ -9,6 +9,7 @@ import {
   vkOf,
   parseKeyCombo,
   buildKeyComboLines,
+  buildKeyEventLine,
   VK_EXTENDED,
 } from "./input.js";
 
@@ -98,6 +99,15 @@ test("buildKeyComboLines only ever interpolates integers (no injection)", () => 
       assert.match(l, /^\[Kbd\]::keybd_event\(\d+, 0, \d+, \[UIntPtr\]::Zero\)$/);
     }
   }
+});
+
+test("buildKeyEventLine emits down/up flags and the extended bit, integers only", () => {
+  assert.equal(buildKeyEventLine("A", true), "[Kbd]::keybd_event(65, 0, 0, [UIntPtr]::Zero)");
+  assert.equal(buildKeyEventLine("A", false), "[Kbd]::keybd_event(65, 0, 2, [UIntPtr]::Zero)");
+  // Win is extended: down=1, up=3 (extended|KEYUP)
+  assert.equal(buildKeyEventLine("Win", true), "[Kbd]::keybd_event(91, 0, 1, [UIntPtr]::Zero)");
+  assert.equal(buildKeyEventLine("Win", false), "[Kbd]::keybd_event(91, 0, 3, [UIntPtr]::Zero)");
+  assert.throws(() => buildKeyEventLine("NotAKey", true), /Unknown key in combo/);
 });
 
 test("VK_EXTENDED contains the navigation/Win keys that require the extended flag", () => {

@@ -146,7 +146,7 @@ Moves the cursor to a pixel coordinate and clicks.
 |-----------|------|----------|-------------|
 | `x` | number | yes | Horizontal pixel coordinate |
 | `y` | number | yes | Vertical pixel coordinate |
-| `button` | string | no | `"left"` (default) or `"right"` |
+| `button` | string | no | `"left"` (default), `"right"`, or `"middle"` |
 | `screen` | number | no | Monitor index the coordinates are relative to — pass the **same index you gave `screenshot`** (see note below) |
 
 Returns: confirmation string `"Clicked (x, y)"`.
@@ -362,6 +362,28 @@ Returns: confirmation string `"Clipboard updated"`.
 
 ---
 
+### `get_clipboard_image`
+
+Returns the image currently on the clipboard as a PNG. Use it after a copy or Snip to pull a captured image into the conversation. Errors if the clipboard holds no image.
+
+No parameters.
+
+Returns: PNG image data (delivered as an MCP image content block).
+
+---
+
+### `set_clipboard_image`
+
+Loads an image file and places it on the clipboard, so it can be pasted into a remote app with `Ctrl+V`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Filesystem path to the image file (PNG/JPG/BMP) |
+
+Returns: confirmation string `"Clipboard image set"`.
+
+---
+
 ### `ocr`
 
 Extracts text from the screen using the Windows built-in OCR engine — free, offline, and no API cost. Omit all parameters to scan the full primary screen, or pass all four to scan a region. Use it as a cheap pre-filter before sending a screenshot to Claude Vision: if the OCR text is unchanged, the Vision call can be skipped.
@@ -432,6 +454,18 @@ Returns: confirmation string `"Pressed: <combo>"`.
 
 ---
 
+### `key_down` / `key_up`
+
+Press and hold a single key (`key_down`), then release it later (`key_up`), via `keybd_event`. Use them to keep a key held across other actions — e.g. `key_down` `Shift`, click several items, `key_up` `Shift` to multi-select; or hold a game/app key. Always release what you hold, or the key stays stuck down.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key` | string | yes | Key name to hold or release (same names as `key_combo`, e.g. `Shift`, `Ctrl`, `Alt`, `A`, `F5`) |
+
+Returns: confirmation string `"Key down: <key>"` / `"Key up: <key>"`.
+
+---
+
 ### `paste_text`
 
 Places text on the clipboard and pastes it with `Ctrl+V`. More reliable than `type_text` for arbitrary characters, long strings, and password fields inside a remote session.
@@ -472,7 +506,7 @@ Presses at a start point, drags to an end point in small steps, and releases. Us
 | `y1` | number | yes | Start vertical pixel coordinate |
 | `x2` | number | yes | End horizontal pixel coordinate |
 | `y2` | number | yes | End vertical pixel coordinate |
-| `button` | string | no | `"left"` (default) or `"right"` |
+| `button` | string | no | `"left"` (default), `"right"`, or `"middle"` |
 | `screen` | number | no | Monitor index for the coordinates (see [`click`](#click)) |
 
 Returns: confirmation string `"Dragged (x1, y1) → (x2, y2)"`.

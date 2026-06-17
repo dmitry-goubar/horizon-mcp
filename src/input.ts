@@ -113,3 +113,15 @@ export function buildKeyComboLines(keys: string[], times: number, holdMs: number
   for (const m of [...mods].reverse()) lines.push(ev(m, true));
   return lines;
 }
+
+/**
+ * Build a single keybd_event statement for pressing (down) or releasing (up) one
+ * key. Used by the key_down / key_up primitives. Emits only integers from the
+ * validated VK map, so there is no script injection.
+ */
+export function buildKeyEventLine(key: string, isDown: boolean): string {
+  const vk = vkOf(key);
+  // KEYEVENTF_EXTENDEDKEY=0x1, KEYEVENTF_KEYUP=0x2
+  const flags = (VK_EXTENDED.has(vk) ? 1 : 0) | (isDown ? 0 : 2);
+  return `[Kbd]::keybd_event(${vk}, 0, ${flags}, [UIntPtr]::Zero)`;
+}

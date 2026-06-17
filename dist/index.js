@@ -5,7 +5,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextpro
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { createRequire } from "node:module";
-import { escapePsSingleQuote, escapeSendKeys, requireFinite, requireInt, parseHexColor, parseKeyCombo, buildKeyComboLines, } from "./input.js";
+import { escapePsSingleQuote, escapeSendKeys, requireFinite, requireInt, parseHexColor, parseKeyCombo, buildKeyComboLines, buildKeyEventLine, } from "./input.js";
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
 const execFileAsync = promisify(execFile);
@@ -114,9 +114,14 @@ const SCREEN_PARAM_DESC = "Monitor index the coordinates are relative to — pas
     "left-of-primary monitor has a negative virtual X). Omit only if x,y are already " +
     "absolute virtual-desktop coordinates.";
 // Move cursor and click via user32.dll
+// MOUSEEVENTF down/up flag pairs per button.
+const MOUSE_FLAGS = {
+    left: ["0x0002", "0x0004"],
+    right: ["0x0008", "0x0010"],
+    middle: ["0x0020", "0x0040"],
+};
 async function mouseClick(x, y, button, double_, screen) {
-    const down = button === "left" ? "0x0002" : "0x0008";
-    const up = button === "left" ? "0x0004" : "0x0010";
+    const [down, up] = MOUSE_FLAGS[button];
     const clicks = double_
         ? `[Mouse]::mouse_event(${down},0,0,0,0); [Mouse]::mouse_event(${up},0,0,0,0); Start-Sleep -Milliseconds 80; [Mouse]::mouse_event(${down},0,0,0,0); [Mouse]::mouse_event(${up},0,0,0,0)`
         : `[Mouse]::mouse_event(${down},0,0,0,0); [Mouse]::mouse_event(${up},0,0,0,0)`;
@@ -472,6 +477,47 @@ async function setClipboard(text) {
     const safeText = escapePsSingleQuote(text);
     await ps(`Set-Clipboard -Value '${safeText}'`);
 }
+// Read an image from the clipboard and return it as base64 PNG.
+async function getClipboardImage() {
+    return ps(`
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$img = [System.Windows.Forms.Clipboard]::GetImage()
+if (-not $img) { throw 'Clipboard does not contain an image' }
+$ms = New-Object System.IO.MemoryStream
+$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$img.Dispose()
+[Convert]::ToBase64String($ms.ToArray())
+`);
+}
+// Load an image file and place it on the clipboard.
+async function setClipboardImage(path) {
+    const safe = escapePsSingleQuote(path);
+    await ps(`
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+if (-not (Test-Path -LiteralPath '${safe}')) { throw 'Image not found: ${safe}' }
+$img = [System.Drawing.Image]::FromFile('${safe}')
+try { [System.Windows.Forms.Clipboard]::SetImage($img) } finally { $img.Dispose() }
+`);
+}
+// PowerShell's ConvertTo-Json renders a single-element array as a bare object, so an
+// OCR result with one line (or a line with one word) would break the documented
+// lines[]/words[] shape. Re-normalize so both are always arrays.
+function normalizeOcrJson(raw) {
+    try {
+        const o = JSON.parse(raw);
+        const asArray = (v) => Array.isArray(v) ? v : v ? [v] : [];
+        const lines = asArray(o.lines);
+        for (const line of lines)
+            line.words = asArray(line.words);
+        o.lines = lines;
+        return JSON.stringify(o);
+    }
+    catch {
+        return raw;
+    }
+}
 // Extract text from the screen (or a region) using Windows built-in WinRT OCR.
 // Returns JSON { text, lines:[{ text, x, y, width, height, words:[{ text, x, y,
 // width, height }] }] }, where every box is in absolute screen pixels (the region
@@ -493,7 +539,7 @@ $bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
 $gfx.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
 $gfx.Dispose()`;
-    return ps(`
+    return normalizeOcrJson(await ps(`
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
@@ -549,7 +595,7 @@ try {
 } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
-`);
+`));
 }
 // Locate a template image on screen by pixel template-matching (a deterministic
 // alternative to Vision). Captures the screen (or a region), then slides the
@@ -646,6 +692,22 @@ public class Kbd {
 ${lines.join("\n")}
 `);
 }
+// Press (down) or release (up) a single key via keybd_event — the primitive behind
+// key_down/key_up, for holding a key across other actions (e.g. hold Shift, click,
+// release). The VK lookup and flag math live in input.ts (unit-tested); only integers
+// from the validated map are emitted, so there is no script injection.
+async function keyEvent(key, isDown) {
+    const line = buildKeyEventLine(key, isDown);
+    await ps(`
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class Kbd {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+"@
+${line}
+`);
+}
 // Put text on the clipboard and paste it with Ctrl+V (via keybd_event).
 // More reliable than SendKeys for arbitrary characters and for password fields
 // in a remote session. NOTE: the value remains on the clipboard afterwards —
@@ -684,8 +746,7 @@ ${resolveCursorPs(x, y, screen)}
 // Press at (x1,y1), drag to (x2,y2) in small steps, release. Steps are needed
 // so the target app registers a real drag (dragging windows, selecting text).
 async function mouseDrag(x1, y1, x2, y2, button, screen) {
-    const down = button === "left" ? "0x0002" : "0x0008";
-    const up = button === "left" ? "0x0004" : "0x0010";
+    const [down, up] = MOUSE_FLAGS[button];
     // Resolve a per-monitor offset ($ox,$oy) once and apply it to both endpoints, so a
     // drag described in `screen`-local coordinates lands on the right monitor.
     const offset = screen === undefined
@@ -794,7 +855,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     y: { type: "number", description: "Vertical pixel coordinate" },
                     button: {
                         type: "string",
-                        enum: ["left", "right"],
+                        enum: ["left", "right", "middle"],
                         description: "Mouse button (default: left)",
                     },
                     screen: { type: "number", description: SCREEN_PARAM_DESC },
@@ -973,6 +1034,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             },
         },
         {
+            name: "get_clipboard_image",
+            description: "Return the image currently on the clipboard as a PNG. Errors if the clipboard holds no image. Use after a copy/Snip to pull a captured image into the conversation.",
+            inputSchema: { type: "object", properties: {}, required: [] },
+        },
+        {
+            name: "set_clipboard_image",
+            description: "Load an image file and place it on the clipboard, so it can be pasted into a remote app with Ctrl+V.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: "Filesystem path to the image file (PNG/JPG/BMP)" },
+                },
+                required: ["path"],
+            },
+        },
+        {
             name: "ocr",
             description: "Extract text from the screen using the Windows built-in OCR engine. Free, offline, no API cost. " +
                 "Returns JSON {text, lines[]} where each line has its text plus a bounding box {x, y, width, height} in absolute screen pixels and a words[] array of the same shape. " +
@@ -1030,6 +1107,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             },
         },
         {
+            name: "key_down",
+            description: "Press and HOLD a single key without releasing it (via keybd_event). Pair with key_up to keep a key held across other actions — e.g. key_down Shift, click, click, key_up Shift to multi-select. Uses the same key names as key_combo.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    key: { type: "string", description: "Key name to hold down (e.g. Shift, Ctrl, Alt, A, F5)" },
+                },
+                required: ["key"],
+            },
+        },
+        {
+            name: "key_up",
+            description: "Release a single key previously held with key_down (via keybd_event). Always release what you hold, or the key stays stuck down. Uses the same key names as key_combo.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    key: { type: "string", description: "Key name to release (e.g. Shift, Ctrl, Alt, A, F5)" },
+                },
+                required: ["key"],
+            },
+        },
+        {
             name: "paste_text",
             description: "Place text on the clipboard and paste it with Ctrl+V. More reliable than type_text for arbitrary characters and for password fields in a remote session. " +
                 "Note: the text stays on the clipboard afterward — for secrets, call set_clipboard with an empty string to clear it.",
@@ -1064,7 +1163,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     y1: { type: "number", description: "Start vertical pixel coordinate" },
                     x2: { type: "number", description: "End horizontal pixel coordinate" },
                     y2: { type: "number", description: "End vertical pixel coordinate" },
-                    button: { type: "string", enum: ["left", "right"], description: "Mouse button to hold during the drag (default: left)" },
+                    button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button to hold during the drag (default: left)" },
                     screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x1", "y1", "x2", "y2"],
@@ -1217,6 +1316,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 await setClipboard(String(a.text));
                 return { content: [{ type: "text", text: "Clipboard updated" }] };
             }
+            case "get_clipboard_image": {
+                const data = await getClipboardImage();
+                return { content: [{ type: "image", data, mimeType: "image/png" }] };
+            }
+            case "set_clipboard_image": {
+                await setClipboardImage(String(a.path));
+                return { content: [{ type: "text", text: "Clipboard image set" }] };
+            }
             case "ocr": {
                 const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
                 const result = hasRegion
@@ -1241,6 +1348,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 const holdMs = a.holdMs !== undefined ? requireFinite(a.holdMs, "holdMs") : 0;
                 await keyCombo(keys, times, holdMs);
                 return { content: [{ type: "text", text: `Pressed: ${keys.join("+")}${times > 1 ? ` x${times}` : ""}` }] };
+            }
+            case "key_down": {
+                await keyEvent(String(a.key), true);
+                return { content: [{ type: "text", text: `Key down: ${a.key}` }] };
+            }
+            case "key_up": {
+                await keyEvent(String(a.key), false);
+                return { content: [{ type: "text", text: `Key up: ${a.key}` }] };
             }
             case "paste_text": {
                 await pasteText(String(a.text));

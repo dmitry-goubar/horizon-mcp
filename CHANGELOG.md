@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format is based on
 - Window & display tools: `get_window_rect` (a window's screen rectangle),
   `window_action` (minimize/maximize/restore/close), `set_window_bounds` (move and/or
   resize), and `list_monitors` (per-screen bounds, primary flag, and DPI/scale).
+- `key_down` / `key_up`: hold and release a single key (via `keybd_event`), so a key can
+  stay held across other actions — e.g. hold Shift, click several items, release.
+- `get_clipboard_image` / `set_clipboard_image`: read the clipboard image as a PNG, or put
+  an image file on the clipboard for pasting into a remote app.
+- Middle mouse button support on `click` and `mouse_drag` (`button: "middle"`).
 - `screenshot_window`: capture a single window (the foreground one by default, or by
   PID/title), cropped to its DWM frame bounds.
 - `find_image`: locate a reference image on screen by pure-.NET pixel template-matching,
@@ -57,6 +62,11 @@ All notable changes to this project are documented here. The format is based on
   error instead of silently returning empty output. Timeouts produce a clear message.
 
 ### Fixed
+- `ocr` now always returns `lines` and each line's `words` as JSON arrays. PowerShell's
+  `ConvertTo-Json` renders a single-element array as a bare object, which previously broke
+  the documented shape for results with exactly one line or word.
+- Resolved all `npm audit` advisories (dev-only transitive dependencies); `npm audit`
+  now reports zero vulnerabilities.
 - `ocr` failed with "Cannot index into a null array" on Windows PowerShell 5.1. The WinRT
   async bridge now resolves the `AsTask` overload by its parameter type and passes the
   result type explicitly, instead of deriving the generic argument from the operation's
