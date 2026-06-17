@@ -299,6 +299,18 @@ Returns: PNG image data (delivered as an MCP image content block).
 
 ---
 
+### `screenshot_window`
+
+Captures a single window as a PNG — the foreground window by default, or one identified by PID/title. It crops to the window's visible frame (via the DWM extended bounds, so there's no desktop bleed from the invisible resize border), which trims Vision token cost compared with a full-screen capture.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target` | string | no | Process ID (number) or partial window title; omit to capture the foreground window |
+
+The target must not be minimized (the tool returns an error telling you to focus or restore it first). Returns: PNG image data (delivered as an MCP image content block).
+
+---
+
 ### `get_pixel_color`
 
 Samples the color of a single screen pixel. Use to cheaply detect a notification dot or a UI state change at a known coordinate without a full screenshot.
@@ -382,6 +394,25 @@ Returns: a JSON object
 Each line and word carries a bounding box in **absolute screen pixels** — the region offset is added back, so the coordinates are directly usable with `click`/`move_mouse` (e.g. click a line's center at `x + width/2`, `y + height/2`) without paying Vision tokens to re-locate the text. Requires an OCR language pack installed in Windows Settings (English is present by default).
 
 > Boxes are pixel-accurate at 100% display scale. On a display scaled above 100%, capture and screen coordinates can diverge — see [Troubleshooting](#troubleshooting).
+
+---
+
+### `find_image`
+
+Locates a reference image (template) on screen by pixel template-matching — a deterministic alternative to Vision for finding a known icon or button. Supply the path to a template PNG; the tool captures the screen (or a region), slides the template across it scoring a sampled grid of points, and returns the best match.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Filesystem path to the template image (PNG) |
+| `threshold` | number | no | Match threshold 0–1 (default `0.9`) |
+| `x` | number | no | Left edge of **search region** (omit to search the full primary screen) |
+| `y` | number | no | Top edge of search region |
+| `width` | number | no | Width of search region in pixels |
+| `height` | number | no | Height of search region in pixels |
+
+Returns: JSON object `{ "found", "score", "x", "y", "width", "height", "centerX", "centerY" }` in absolute screen pixels — click `centerX`/`centerY` to hit the match. `score` is `0`–`1` (`1` = exact); `found` is true only if it meets the threshold. Restrict the search region for speed.
+
+> Best for exact-pixel icons captured at the same display scale. It is **not** robust to resizing, theme changes, or scaling differences — for those, prefer `ocr` (text) or Vision.
 
 ---
 

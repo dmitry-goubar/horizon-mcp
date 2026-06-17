@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format is based on
 - Window & display tools: `get_window_rect` (a window's screen rectangle),
   `window_action` (minimize/maximize/restore/close), `set_window_bounds` (move and/or
   resize), and `list_monitors` (per-screen bounds, primary flag, and DPI/scale).
+- `screenshot_window`: capture a single window (the foreground one by default, or by
+  PID/title), cropped to its DWM frame bounds.
+- `find_image`: locate a reference image on screen by pure-.NET pixel template-matching,
+  returning the match's bounding box and clickable center — a deterministic alternative to
+  Vision for known icons.
 - Synchronization tools: `wait_for_pixel` (poll a pixel until it matches a color) and
   `wait_for_text` (poll OCR until a substring appears, returning its bounding box),
   replacing brittle fixed `wait` calls.

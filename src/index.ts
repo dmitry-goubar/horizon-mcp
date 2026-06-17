@@ -161,19 +161,23 @@ ${clicks}
 `);
 }
 
-// Type text via SendKeys, one character at a time with a small delay between
-// keystrokes. SendWait on the whole string at once drops characters when the target
-// is a remote Horizon session — the remote can't ingest a fast burst, so e.g. a
-// 13-char password arrives as ~4 chars. Pacing each keystroke makes typing reliable.
-// For long or multi-line text, prefer paste_text (clipboard), which is a single event.
-const TYPE_CHAR_DELAY_MS = 30;
+// Type text via SendKeys, one character at a time. SendWait on the whole string at
+// once drops characters when the target is a remote Horizon session, and even a fast
+// per-char burst is dropped by a remote *secure logon* field — the input travels
+// laptop -> Horizon -> remote session, so each keystroke needs time to land. A pause
+// BEFORE each keystroke lets the field settle and receive it; field-tested that 30ms
+// was too short for a logon screen (a 13-char password arrived as ~4 chars), so this
+// is generous. Each SendWait is wrapped so one problematic character cannot abort the
+// rest of the string (the ps() wrapper otherwise stops on the first error). For long
+// or multi-line text, prefer paste_text (clipboard), which is a single event.
+const TYPE_CHAR_DELAY_MS = 120;
 async function sendText(text: string): Promise<void> {
   if (!text) return;
   // Spread by code point (handles surrogate pairs); escape each char for SendKeys,
   // then embed in a PS single-quoted literal (fully literal — no $/backtick expansion).
   const lines = [...text].map((ch) => {
     const lit = escapePsSingleQuote(escapeSendKeys(ch));
-    return `[System.Windows.Forms.SendKeys]::SendWait('${lit}'); Start-Sleep -Milliseconds ${TYPE_CHAR_DELAY_MS}`;
+    return `Start-Sleep -Milliseconds ${TYPE_CHAR_DELAY_MS}; try { [System.Windows.Forms.SendKeys]::SendWait('${lit}') } catch {}`;
   });
   await ps("Add-Type -AssemblyName System.Windows.Forms\n" + lines.join("\n"));
 }
@@ -426,6 +430,49 @@ $gfx.Dispose(); $bmp.Dispose()
 `);
 }
 
+// Capture a single window as base64 PNG — the foreground window if no target is
+// given, otherwise one matched by PID or partial title. Crops to the DWM extended
+// frame bounds (excludes the invisible resize border) so there is no desktop bleed.
+async function screenshotWindow(target?: string): Promise<string> {
+  const resolve =
+    target === undefined
+      ? `$h = [WinShot]::GetForegroundWindow()`
+      : `$p = Get-Process | ${windowSelector(target)} | Select-Object -First 1
+if (-not $p) { throw 'Window not found: ${escapePsSingleQuote(target)}' }
+$h = $p.MainWindowHandle`;
+  return ps(`
+Add-Type -AssemblyName System.Drawing
+Add-Type @"
+using System; using System.Drawing; using System.Runtime.InteropServices;
+public class WinShot {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  // DWMWA_EXTENDED_FRAME_BOUNDS = 9 → the visible frame; fall back to GetWindowRect.
+  public static RECT Bounds(IntPtr h) {
+    RECT r;
+    if (DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT))) != 0) GetWindowRect(h, out r);
+    return r;
+  }
+}
+"@
+${resolve}
+if ($h -eq [IntPtr]::Zero) { throw 'No target window' }
+if ([WinShot]::IsIconic($h)) { throw 'Target window is minimized; focus or restore it first' }
+$r = [WinShot]::Bounds($h)
+$w = $r.Right - $r.Left; $ht = $r.Bottom - $r.Top
+$bmp = New-Object System.Drawing.Bitmap($w, $ht)
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
+$ms = New-Object System.IO.MemoryStream
+$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$gfx.Dispose(); $bmp.Dispose()
+[Convert]::ToBase64String($ms.ToArray())
+`);
+}
+
 // Sample the color of a single pixel
 async function getPixelColor(x: number, y: number): Promise<string> {
   return ps(`
@@ -553,6 +600,89 @@ try {
     ConvertTo-Json -Compress -Depth 6 @{ text = $res.Text; lines = $lines }
 } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+}
+`);
+}
+
+// Locate a template image on screen by pixel template-matching (a deterministic
+// alternative to Vision). Captures the screen (or a region), then slides the
+// template across it scoring a sampled grid of points by sum-of-absolute-difference
+// with early abort. Returns JSON {found, score, x, y, width, height, centerX,
+// centerY} in absolute screen pixels. Pixel access uses LockBits for speed.
+async function findImage(
+  path: string, threshold: number,
+  x?: number, y?: number, width?: number, height?: number
+): Promise<string> {
+  const hasRegion = x !== undefined && y !== undefined && width !== undefined && height !== undefined;
+  const safePath = escapePsSingleQuote(path);
+  const capture = hasRegion
+    ? `$offX = ${x}; $offY = ${y}
+$bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen(${x}, ${y}, 0, 0, $bmp.Size)
+$gfx.Dispose()`
+    : `$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$offX = $s.Location.X; $offY = $s.Location.Y
+$bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+$gfx.Dispose()`;
+  return ps(`
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
+using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices;
+public class TemplateMatch {
+  public static string Find(string hayPath, string ndlPath, int offX, int offY, double threshold) {
+    using (Bitmap hay = new Bitmap(hayPath))
+    using (Bitmap ndl = new Bitmap(ndlPath)) {
+      int HW = hay.Width, HH = hay.Height, NW = ndl.Width, NH = ndl.Height;
+      if (NW > HW || NH > HH) return "{\\"found\\":false,\\"reason\\":\\"template larger than search area\\"}";
+      var hd = hay.LockBits(new Rectangle(0,0,HW,HH), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+      var nd = ndl.LockBits(new Rectangle(0,0,NW,NH), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+      try {
+        int hS = hd.Stride, nS = nd.Stride;
+        byte[] H = new byte[hS*HH]; byte[] N = new byte[nS*NH];
+        Marshal.Copy(hd.Scan0, H, 0, H.Length); Marshal.Copy(nd.Scan0, N, 0, N.Length);
+        // Sample up to ~9x9 points across the template instead of every pixel.
+        int gx = Math.Max(1, NW/8), gy = Math.Max(1, NH/8);
+        var px = new System.Collections.Generic.List<int>(); var py = new System.Collections.Generic.List<int>();
+        for (int ty=0; ty<NH; ty+=gy) for (int tx=0; tx<NW; tx+=gx) { px.Add(tx); py.Add(ty); }
+        int K = px.Count;
+        long best = long.MaxValue; int bx = -1, by = -1;
+        for (int y=0; y<=HH-NH; y++) {
+          for (int x=0; x<=HW-NW; x++) {
+            long sum = 0;
+            for (int i=0; i<K; i++) {
+              int hi = (y+py[i])*hS + (x+px[i])*4;
+              int ni = py[i]*nS + px[i]*4;
+              sum += Math.Abs(H[hi]-N[ni]) + Math.Abs(H[hi+1]-N[ni+1]) + Math.Abs(H[hi+2]-N[ni+2]);
+              if (sum >= best) break;
+            }
+            if (sum < best) { best = sum; bx = x; by = y; }
+          }
+        }
+        double score = bx < 0 ? 0 : 1.0 - ((double)best / ((double)K*3*255));
+        bool found = bx >= 0 && score >= threshold;
+        var ic = System.Globalization.CultureInfo.InvariantCulture;
+        return "{\\"found\\":" + (found?"true":"false")
+          + ",\\"score\\":" + score.ToString("0.000", ic)
+          + ",\\"x\\":" + (offX+bx) + ",\\"y\\":" + (offY+by)
+          + ",\\"width\\":" + NW + ",\\"height\\":" + NH
+          + ",\\"centerX\\":" + (offX+bx+NW/2) + ",\\"centerY\\":" + (offY+by+NH/2) + "}";
+      } finally { hay.UnlockBits(hd); ndl.UnlockBits(nd); }
+    }
+  }
+}
+"@
+if (-not (Test-Path -LiteralPath '${safePath}')) { throw 'Template image not found: ${safePath}' }
+${capture}
+$tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString('N') + '.png')
+$bmp.Save($tmp); $bmp.Dispose()
+try {
+  [TemplateMatch]::Find($tmp, '${safePath}', $offX, $offY, ${threshold})
+} finally {
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
 `);
 }
@@ -870,6 +1000,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "screenshot_window",
+      description:
+        "Capture a single window as a PNG — the foreground window by default, or one identified by a numeric PID or partial title. Crops to the window's visible frame (DWM extended bounds), cutting Vision token cost versus a full-screen capture. The target must not be minimized.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target: { type: "string", description: "Process ID (number) or partial window title; omit to capture the foreground window" },
+        },
+        required: [],
+      },
+    },
+    {
       name: "get_pixel_color",
       description: "Return the color of a single screen pixel as JSON {R, G, B, Hex}. Use to cheaply detect notification dots or UI state changes at known coordinates.",
       inputSchema: {
@@ -929,6 +1071,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           height: { type: "number", description: "Height of region in pixels" },
         },
         required: [],
+      },
+    },
+    {
+      name: "find_image",
+      description:
+        "Locate a reference image (template) on screen by pixel template-matching — a deterministic alternative to Vision for finding a known icon or button. " +
+        "Pass the filesystem path to a template PNG. Returns JSON {found, score, x, y, width, height, centerX, centerY} in absolute screen pixels; click centerX/centerY to hit it. " +
+        "score is 0–1 (1 = exact); a match must meet the threshold (default 0.9). Restrict the search to a region with x/y/width/height for speed. " +
+        "Best for exact-pixel icons captured at the same scale; not robust to resizing or theme changes.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path:      { type: "string", description: "Filesystem path to the template image (PNG)" },
+          threshold: { type: "number", description: "Match threshold 0–1 (default 0.9)" },
+          x:         { type: "number", description: "Left edge of search region (omit to search the full primary screen)" },
+          y:         { type: "number", description: "Top edge of search region" },
+          width:     { type: "number", description: "Width of search region in pixels" },
+          height:    { type: "number", description: "Height of search region in pixels" },
+        },
+        required: ["path"],
       },
     },
     {
@@ -1124,6 +1286,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         );
         return { content: [{ type: "image", data, mimeType: "image/png" }] };
       }
+      case "screenshot_window": {
+        const target = a.target !== undefined ? String(a.target) : undefined;
+        const data = await screenshotWindow(target);
+        return { content: [{ type: "image", data, mimeType: "image/png" }] };
+      }
       case "get_pixel_color": {
         const result = await getPixelColor(requireInt(a.x, "x"), requireInt(a.y, "y"));
         return { content: [{ type: "text", text: result }] };
@@ -1151,6 +1318,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
               requireInt(a.width, "width"), requireInt(a.height, "height")
             )
           : await runOcr();
+        return { content: [{ type: "text", text: result }] };
+      }
+      case "find_image": {
+        const path = String(a.path);
+        const threshold = a.threshold !== undefined
+          ? Math.min(Math.max(requireFinite(a.threshold, "threshold"), 0), 1)
+          : 0.9;
+        const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
+        const result = hasRegion
+          ? await findImage(
+              path, threshold,
+              requireInt(a.x, "x"), requireInt(a.y, "y"),
+              requireInt(a.width, "width"), requireInt(a.height, "height")
+            )
+          : await findImage(path, threshold);
         return { content: [{ type: "text", text: result }] };
       }
       case "key_combo": {

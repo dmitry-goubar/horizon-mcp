@@ -55,9 +55,11 @@ session before shipping, so they are planned rather than done.
   replacing brittle fixed `wait` calls.
 - ✅ **Window management verbs** — `window_action` (minimize/maximize/restore/close) and
   `set_window_bounds` (move/resize), alongside the existing `focus_window`.
-- 🔜 **Active-window screenshot** — capture just the focused window.
-- 🔜 **Find-image / template match** — locate an icon by reference image as a
-  deterministic alternative to Vision.
+- ✅ **Active-window screenshot** (`screenshot_window`) — capture just the focused window
+  (or one by PID/title), cropped to its DWM frame bounds.
+- ✅ **Find-image / template match** (`find_image`) — locate a reference image on screen
+  via pure-.NET pixel matching, returning its box and clickable center. A deterministic
+  alternative to Vision for exact-pixel icons.
 - ✅ **Monitor enumeration** (`list_monitors`) — per-screen bounds, primary flag, and
   DPI/scale.
 - 🔜 Smaller input additions — middle mouse button, separate key down/up primitives,
