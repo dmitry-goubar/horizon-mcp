@@ -62,6 +62,10 @@ All notable changes to this project are documented here. The format is based on
   error instead of silently returning empty output. Timeouts produce a clear message.
 
 ### Fixed
+- `screenshot` with no `screen` argument (combined all-monitor capture) failed with
+  "Parameter is not valid" on multi-monitor setups: the virtual-desktop width/height came
+  from `Measure-Object` as `Double`, which the `Bitmap(int, int)` constructor rejects. The
+  bounds are now cast to `int`. Single-monitor and specific-`screen` captures were unaffected.
 - `ocr` now always returns `lines` and each line's `words` as JSON arrays. PowerShell's
   `ConvertTo-Json` renders a single-element array as a bare object, which previously broke
   the documented shape for results with exactly one line or word.

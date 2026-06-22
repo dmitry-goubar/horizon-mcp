@@ -82,10 +82,12 @@ async function takeScreenshot(screenIndex?: number): Promise<string> {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $screens = [System.Windows.Forms.Screen]::AllScreens
-$left   = ($screens | ForEach-Object { $_.Bounds.Left }   | Measure-Object -Minimum).Minimum
-$top    = ($screens | ForEach-Object { $_.Bounds.Top }    | Measure-Object -Minimum).Minimum
-$right  = ($screens | ForEach-Object { $_.Bounds.Right }  | Measure-Object -Maximum).Maximum
-$bottom = ($screens | ForEach-Object { $_.Bounds.Bottom } | Measure-Object -Maximum).Maximum
+# Measure-Object returns Double; cast to int or the Bitmap(int,int) ctor throws
+# "Parameter is not valid" (the single-screen path uses int Bounds.Width/Height).
+$left   = [int](($screens | ForEach-Object { $_.Bounds.Left }   | Measure-Object -Minimum).Minimum)
+$top    = [int](($screens | ForEach-Object { $_.Bounds.Top }    | Measure-Object -Minimum).Minimum)
+$right  = [int](($screens | ForEach-Object { $_.Bounds.Right }  | Measure-Object -Maximum).Maximum)
+$bottom = [int](($screens | ForEach-Object { $_.Bounds.Bottom } | Measure-Object -Maximum).Maximum)
 $bmp = New-Object System.Drawing.Bitmap(($right - $left), ($bottom - $top))
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
 $gfx.CopyFromScreen($left, $top, 0, 0, $bmp.Size)
