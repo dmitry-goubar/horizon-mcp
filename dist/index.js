@@ -111,10 +111,28 @@ $__b = [System.Windows.Forms.Screen]::AllScreens[${screen}].Bounds
 $cx = $__b.X + (${x}); $cy = $__b.Y + (${y})`;
 }
 // Shared schema description for the optional `screen` param on the mouse tools.
-const SCREEN_PARAM_DESC = "Monitor index the coordinates are relative to — pass the SAME index you gave " +
-    "`screenshot` so the click lands on the right monitor (on multi-monitor setups a " +
-    "left-of-primary monitor has a negative virtual X). Omit only if x,y are already " +
-    "absolute virtual-desktop coordinates.";
+const SCREEN_PARAM_DESC = "Monitor index (the `index` field from `list_monitors`) that x,y are relative to: " +
+    "x,y are treated as 0-based from that monitor's top-left, so you avoid virtual-desktop " +
+    "offsets (a left-of-primary monitor has a negative virtual X). NOTE: indices are the OS " +
+    "enumeration order and are NOT necessarily primary-first — check `list_monitors`. Omit " +
+    "only if x,y are already absolute virtual-desktop coordinates.";
+// Same idea for capture/read tools, which also REPORT coordinates: with `screen`,
+// returned coordinates (OCR boxes, find_image matches) are screen-local too, so they
+// feed straight back into click/move with the same `screen`.
+const SCREEN_PARAM_DESC_RW = "Monitor index (the `index` field from `list_monitors`) to work in. With it, the " +
+    "region x,y are 0-based from that monitor's top-left AND any returned coordinates are " +
+    "screen-local — so pass the same `screen` to click/move the result. Indices are OS " +
+    "order, not primary-first. Omit to use absolute virtual-desktop coordinates.";
+// Emit PS that sets $ox/$oy to a monitor's virtual-desktop origin (0,0 when no screen
+// is given), so screen-local x,y can be shifted to absolute capture coordinates with
+// ($ox + x, $oy + y). Used by the capture/read tools for screen-local addressing.
+function screenOffsetPs(screen) {
+    if (screen === undefined)
+        return `$ox = 0; $oy = 0`;
+    return `Add-Type -AssemblyName System.Windows.Forms
+$__so = [System.Windows.Forms.Screen]::AllScreens[${screen}].Bounds
+$ox = $__so.X; $oy = $__so.Y`;
+}
 // Move cursor and click via user32.dll
 // MOUSEEVENTF down/up flag pairs per button.
 const MOUSE_FLAGS = {
@@ -289,6 +307,7 @@ ConvertTo-Json -Compress @{ Title = $sb.ToString(); Pid = [int]$pid_ }
 async function getWindowRect(pidOrTitle) {
     const selector = windowSelector(pidOrTitle);
     return ps(`
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public class WinRect {
@@ -300,9 +319,16 @@ $p = Get-Process | ${selector} | Select-Object -First 1
 if ($p) {
   $r = New-Object WinRect+RECT
   [WinRect]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+  # Which monitor is the window mostly on? FromHandle picks the max-overlap screen;
+  # map it to its AllScreens index so the caller can pass it as the 'screen' param.
+  $screens = [System.Windows.Forms.Screen]::AllScreens
+  $scr = [System.Windows.Forms.Screen]::FromHandle($p.MainWindowHandle)
+  $idx = -1
+  for ($i = 0; $i -lt $screens.Count; $i++) { if ($screens[$i].DeviceName -eq $scr.DeviceName) { $idx = $i; break } }
   ConvertTo-Json -Compress @{ Title = $p.MainWindowTitle; Pid = $p.Id;
     Left = $r.Left; Top = $r.Top; Right = $r.Right; Bottom = $r.Bottom;
-    Width = ($r.Right - $r.Left); Height = ($r.Bottom - $r.Top) }
+    Width = ($r.Right - $r.Left); Height = ($r.Bottom - $r.Top);
+    Screen = $idx; Device = $scr.DeviceName }
 } else { "Window not found: ${pidOrTitle}" }
 `);
 }
@@ -377,23 +403,28 @@ public class MonDpi {
   }
 }
 "@
-$mons = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
-  $b = $_.Bounds
+# index = the value to pass as the screen parameter on other tools (it is the
+# position in AllScreens, which is NOT necessarily primary-first).
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$mons = @(for ($i = 0; $i -lt $screens.Count; $i++) {
+  $s = $screens[$i]; $b = $s.Bounds
   $dpi = [MonDpi]::Get($b.X + [int]($b.Width / 2), $b.Y + [int]($b.Height / 2))
-  @{ device = $_.DeviceName; primary = $_.Primary;
+  @{ index = $i; device = $s.DeviceName; primary = $s.Primary;
      x = $b.X; y = $b.Y; width = $b.Width; height = $b.Height;
      dpi = [int]$dpi; scale = [int][math]::Round($dpi / 96 * 100) }
 })
 ConvertTo-Json -Compress -Depth 4 $mons
 `);
 }
-// Capture a rectangular region of the screen, returns base64 PNG
-async function screenshotRegion(x, y, width, height) {
+// Capture a rectangular region of the screen, returns base64 PNG. With `screen`, x/y
+// are local to that monitor's top-left.
+async function screenshotRegion(x, y, width, height, screen) {
     return ps(`
+${screenOffsetPs(screen)}
 Add-Type -AssemblyName System.Drawing
 $bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-$gfx.CopyFromScreen(${x}, ${y}, 0, 0, $bmp.Size)
+$gfx.CopyFromScreen($ox + ${x}, $oy + ${y}, 0, 0, $bmp.Size)
 $ms = New-Object System.IO.MemoryStream
 $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
 $gfx.Dispose(); $bmp.Dispose()
@@ -441,9 +472,10 @@ $gfx.Dispose(); $bmp.Dispose()
 [Convert]::ToBase64String($ms.ToArray())
 `);
 }
-// Sample the color of a single pixel
-async function getPixelColor(x, y) {
+// Sample the color of a single pixel. With `screen`, x/y are local to that monitor.
+async function getPixelColor(x, y, screen) {
     return ps(`
+${screenOffsetPs(screen)}
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public class PixelUtil {
@@ -453,7 +485,7 @@ public class PixelUtil {
 }
 "@
 $dc = [PixelUtil]::GetDC([IntPtr]::Zero)
-$c = [PixelUtil]::GetPixel($dc, ${x}, ${y})
+$c = [PixelUtil]::GetPixel($dc, $ox + ${x}, $oy + ${y})
 [PixelUtil]::ReleaseDC([IntPtr]::Zero, $dc) | Out-Null
 $r = [int]($c -band 0xFF)
 $g = [int](($c -shr 8) -band 0xFF)
@@ -529,20 +561,29 @@ function normalizeOcrJson(raw) {
 }
 // Extract text from the screen (or a region) using Windows built-in WinRT OCR.
 // Returns JSON { text, lines:[{ text, x, y, width, height, words:[{ text, x, y,
-// width, height }] }] }, where every box is in absolute screen pixels (the region
-// offset is added back), so located text can be clicked directly without a Vision
-// round-trip. Uses a temp PNG file to bridge System.Drawing and the WinRT BitmapDecoder.
-async function runOcr(x, y, width, height) {
+// width, height }] }] }. $offX/$offY are the reporting origin added to each box: when
+// `screen` is given they stay the screen-LOCAL region origin (so boxes are screen-local
+// and feed back into click with the same screen); otherwise they are absolute. The
+// capture origin is shifted by the monitor's virtual offset. Uses a temp PNG to bridge
+// System.Drawing and the WinRT BitmapDecoder.
+async function runOcr(x, y, width, height, screen) {
     const hasRegion = x !== undefined && y !== undefined && width !== undefined && height !== undefined;
-    // $offX/$offY are the captured bitmap's top-left in screen space; OCR returns
-    // box coordinates relative to the bitmap, so adding the offset makes them absolute.
     const captureScript = hasRegion
-        ? `$offX = ${x}; $offY = ${y}
+        ? `${screenOffsetPs(screen)}
+$offX = ${x}; $offY = ${y}
 $bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-$gfx.CopyFromScreen(${x}, ${y}, 0, 0, $bmp.Size)
+$gfx.CopyFromScreen($ox + ${x}, $oy + ${y}, 0, 0, $bmp.Size)
 $gfx.Dispose()`
-        : `$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        : screen !== undefined
+            ? `Add-Type -AssemblyName System.Windows.Forms
+$__m = [System.Windows.Forms.Screen]::AllScreens[${screen}].Bounds
+$offX = 0; $offY = 0
+$bmp = New-Object System.Drawing.Bitmap($__m.Width, $__m.Height)
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen($__m.X, $__m.Y, 0, 0, $bmp.Size)
+$gfx.Dispose()`
+            : `$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $offX = $s.Location.X; $offY = $s.Location.Y
 $bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
@@ -611,16 +652,28 @@ try {
 // template across it scoring a sampled grid of points by sum-of-absolute-difference
 // with early abort. Returns JSON {found, score, x, y, width, height, centerX,
 // centerY} in absolute screen pixels. Pixel access uses LockBits for speed.
-async function findImage(path, threshold, x, y, width, height) {
+async function findImage(path, threshold, x, y, width, height, screen) {
     const hasRegion = x !== undefined && y !== undefined && width !== undefined && height !== undefined;
     const safePath = escapePsSingleQuote(path);
+    // $offX/$offY are added to the match position for reporting: screen-local when a
+    // `screen` is given (so the result feeds back into click with the same screen),
+    // absolute otherwise. The capture origin is shifted by the monitor's virtual offset.
     const capture = hasRegion
-        ? `$offX = ${x}; $offY = ${y}
+        ? `${screenOffsetPs(screen)}
+$offX = ${x}; $offY = ${y}
 $bmp = New-Object System.Drawing.Bitmap(${width}, ${height})
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-$gfx.CopyFromScreen(${x}, ${y}, 0, 0, $bmp.Size)
+$gfx.CopyFromScreen($ox + ${x}, $oy + ${y}, 0, 0, $bmp.Size)
 $gfx.Dispose()`
-        : `$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        : screen !== undefined
+            ? `Add-Type -AssemblyName System.Windows.Forms
+$__m = [System.Windows.Forms.Screen]::AllScreens[${screen}].Bounds
+$offX = 0; $offY = 0
+$bmp = New-Object System.Drawing.Bitmap($__m.Width, $__m.Height)
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen($__m.X, $__m.Y, 0, 0, $bmp.Size)
+$gfx.Dispose()`
+            : `$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $offX = $s.Location.X; $offY = $s.Location.Y
 $bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
@@ -788,13 +841,13 @@ Start-Sleep -Milliseconds 60
 // Poll a pixel until it matches a target color (within per-channel tolerance) or
 // the timeout elapses. Each sample is a short PowerShell call, so the total wait
 // can safely exceed the per-call timeout. Returns JSON { matched, color, elapsedMs }.
-async function waitForPixel(x, y, hex, timeoutMs, intervalMs, tolerance) {
+async function waitForPixel(x, y, hex, timeoutMs, intervalMs, tolerance, screen) {
     const target = parseHexColor(hex); // throws on malformed input
     const start = Date.now();
     for (;;) {
         let c = { R: -1, G: -1, B: -1, Hex: "" };
         try {
-            c = JSON.parse(await getPixelColor(x, y));
+            c = JSON.parse(await getPixelColor(x, y, screen));
         }
         catch { /* keep sentinel */ }
         const matched = Math.abs(c.R - target.r) <= tolerance &&
@@ -811,14 +864,14 @@ async function waitForPixel(x, y, hex, timeoutMs, intervalMs, tolerance) {
 // Poll OCR until a case-insensitive substring appears, or the timeout elapses.
 // On a match, returns the found line's text and bounding box so the caller can
 // click it. Returns JSON { matched, elapsedMs, match: OcrLine | null }.
-async function waitForText(needle, timeoutMs, intervalMs, x, y, width, height) {
+async function waitForText(needle, timeoutMs, intervalMs, x, y, width, height, screen) {
     const hasRegion = x !== undefined && y !== undefined && width !== undefined && height !== undefined;
     const target = needle.toLowerCase();
     const start = Date.now();
     for (;;) {
         let lines = [];
         try {
-            const parsed = JSON.parse(hasRegion ? await runOcr(x, y, width, height) : await runOcr());
+            const parsed = JSON.parse(hasRegion ? await runOcr(x, y, width, height, screen) : await runOcr(undefined, undefined, undefined, undefined, screen));
             // ConvertTo-Json renders a single-element array as an object; normalize.
             lines = Array.isArray(parsed.lines) ? parsed.lines : parsed.lines ? [parsed.lines] : [];
         }
@@ -842,13 +895,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
         {
             name: "screenshot",
-            description: "Capture one or all screens. Returns a PNG image. Omit 'screen' to capture all monitors side-by-side. Pass screen=0 for the primary monitor, screen=1 for the second monitor, etc.",
+            description: "Capture one or all screens. Returns a PNG image. Omit 'screen' to capture all monitors combined. Otherwise pass a monitor index from `list_monitors` (the `index` field) — indices are OS enumeration order, NOT necessarily primary-first.",
             inputSchema: {
                 type: "object",
                 properties: {
                     screen: {
                         type: "number",
-                        description: "Monitor index (0 = primary, 1 = second, …). Omit to capture all screens combined.",
+                        description: "Monitor index from `list_monitors` (`index` field; OS order, not necessarily primary-first). Omit to capture all screens combined.",
                     },
                 },
                 required: [],
@@ -933,7 +986,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         {
             name: "get_window_rect",
-            description: "Return a window's screen rectangle as JSON {Title, Pid, Left, Top, Right, Bottom, Width, Height}. Pass a numeric PID or a partial window title. Use to target clicks relative to a window, or to verify a move/resize.",
+            description: "Return a window's screen rectangle as JSON {Title, Pid, Left, Top, Right, Bottom, Width, Height, Screen, Device}. Pass a numeric PID or a partial window title. `Screen` is the monitor index the window is mostly on (matches `list_monitors` and the `screen` param) and `Device` its name — so to find which monitor an app like Horizon is on, look it up here and pass that `Screen` as `screen` to the spatial tools.",
             inputSchema: {
                 type: "object",
                 properties: {
@@ -971,7 +1024,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         {
             name: "list_monitors",
-            description: "Return a JSON array of monitors, each {device, primary, x, y, width, height, dpi, scale}. Coordinates are virtual-desktop pixels (secondary monitors can have negative x/y); scale is the percentage where 100 = no scaling. Use to map a multi-monitor layout before capturing or clicking.",
+            description: "Return a JSON array of monitors, each {index, device, primary, x, y, width, height, dpi, scale}. `index` is the value to pass as `screen` on other tools (OS enumeration order — NOT necessarily primary-first, so the primary may not be index 0). x,y are the monitor's top-left in virtual-desktop pixels (a left-of-primary monitor has negative x); a monitor spans x..x+width. scale is the percentage where 100 = no scaling. Call this first to map a multi-monitor layout and learn which index is which.",
             inputSchema: { type: "object", properties: {}, required: [] },
         },
         {
@@ -984,6 +1037,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     y: { type: "number", description: "Top edge pixel coordinate" },
                     width: { type: "number", description: "Width in pixels" },
                     height: { type: "number", description: "Height in pixels" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x", "y", "width", "height"],
             },
@@ -1007,6 +1061,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                 properties: {
                     x: { type: "number", description: "Horizontal pixel coordinate" },
                     y: { type: "number", description: "Vertical pixel coordinate" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x", "y"],
             },
@@ -1063,15 +1118,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "Extract text from the screen using the Windows built-in OCR engine. Free, offline, no API cost. " +
                 "Returns JSON {text, lines[]} where each line has its text plus a bounding box {x, y, width, height} in absolute screen pixels and a words[] array of the same shape. " +
                 "The boxes let you click located text directly (e.g. click a line's center) without a Vision round-trip to re-find it. " +
-                "Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region — box coordinates are absolute either way. " +
+                "Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region. Box coordinates are absolute virtual-desktop pixels, or screen-local if `screen` is given. " +
                 "Use as a cheap pre-filter before sending screenshots to Claude Vision.",
             inputSchema: {
                 type: "object",
                 properties: {
-                    x: { type: "number", description: "Left edge of region (omit for full primary screen)" },
+                    x: { type: "number", description: "Left edge of region (omit for full screen)" },
                     y: { type: "number", description: "Top edge of region" },
                     width: { type: "number", description: "Width of region in pixels" },
                     height: { type: "number", description: "Height of region in pixels" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC_RW },
                 },
                 required: [],
             },
@@ -1079,7 +1135,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: "find_image",
             description: "Locate a reference image (template) on screen by pixel template-matching — a deterministic alternative to Vision for finding a known icon or button. " +
-                "Pass the filesystem path to a template PNG. Returns JSON {found, score, x, y, width, height, centerX, centerY} in absolute screen pixels; click centerX/centerY to hit it. " +
+                "Pass the filesystem path to a template PNG. Returns JSON {found, score, x, y, width, height, centerX, centerY}; coordinates are absolute virtual-desktop pixels, or screen-local if `screen` is given; click centerX/centerY to hit it. " +
                 "score is 0–1 (1 = exact); a match must meet the threshold (default 0.9). Restrict the search to a region with x/y/width/height for speed. " +
                 "Best for exact-pixel icons captured at the same scale; not robust to resizing or theme changes.",
             inputSchema: {
@@ -1087,10 +1143,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                 properties: {
                     path: { type: "string", description: "Filesystem path to the template image (PNG)" },
                     threshold: { type: "number", description: "Match threshold 0–1 (default 0.9)" },
-                    x: { type: "number", description: "Left edge of search region (omit to search the full primary screen)" },
+                    x: { type: "number", description: "Left edge of search region (omit to search the full screen)" },
                     y: { type: "number", description: "Top edge of search region" },
                     width: { type: "number", description: "Width of search region in pixels" },
                     height: { type: "number", description: "Height of search region in pixels" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC_RW },
                 },
                 required: ["path"],
             },
@@ -1201,23 +1258,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     timeoutMs: { type: "number", description: "Max time to wait in ms (default 5000, max 120000)" },
                     intervalMs: { type: "number", description: "Poll interval in ms (default 300)" },
                     tolerance: { type: "number", description: "Per-channel match tolerance 0–255 (default 10)" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC },
                 },
                 required: ["x", "y", "color"],
             },
         },
         {
             name: "wait_for_text",
-            description: "Poll OCR until the given text appears on screen (case-insensitive substring) or the timeout elapses. Returns JSON {matched, elapsedMs, match} where match carries the found line's text and bounding box {x, y, width, height} so you can click it. Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region.",
+            description: "Poll OCR until the given text appears on screen (case-insensitive substring) or the timeout elapses. Returns JSON {matched, elapsedMs, match} where match carries the found line's text and bounding box {x, y, width, height} so you can click it (screen-local if `screen` is given). Omit x/y/width/height to scan the full primary screen, or pass all four to scan a region.",
             inputSchema: {
                 type: "object",
                 properties: {
                     text: { type: "string", description: "Substring to wait for (case-insensitive)" },
                     timeoutMs: { type: "number", description: "Max time to wait in ms (default 10000, max 120000)" },
                     intervalMs: { type: "number", description: "Poll interval in ms (default 600)" },
-                    x: { type: "number", description: "Left edge of region (omit for full primary screen)" },
+                    x: { type: "number", description: "Left edge of region (omit for full screen)" },
                     y: { type: "number", description: "Top edge of region" },
                     width: { type: "number", description: "Width of region in pixels" },
                     height: { type: "number", description: "Height of region in pixels" },
+                    screen: { type: "number", description: SCREEN_PARAM_DESC_RW },
                 },
                 required: ["text"],
             },
@@ -1298,7 +1357,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 return { content: [{ type: "text", text: result }] };
             }
             case "screenshot_region": {
-                const data = await screenshotRegion(requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"));
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                const data = await screenshotRegion(requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"), screen);
                 return { content: [{ type: "image", data, mimeType: "image/png" }] };
             }
             case "screenshot_window": {
@@ -1307,7 +1367,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 return { content: [{ type: "image", data, mimeType: "image/png" }] };
             }
             case "get_pixel_color": {
-                const result = await getPixelColor(requireInt(a.x, "x"), requireInt(a.y, "y"));
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                const result = await getPixelColor(requireInt(a.x, "x"), requireInt(a.y, "y"), screen);
                 return { content: [{ type: "text", text: result }] };
             }
             case "scroll": {
@@ -1334,10 +1395,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 return { content: [{ type: "text", text: "Clipboard image set" }] };
             }
             case "ocr": {
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
                 const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
                 const result = hasRegion
-                    ? await runOcr(requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"))
-                    : await runOcr();
+                    ? await runOcr(requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"), screen)
+                    : await runOcr(undefined, undefined, undefined, undefined, screen);
                 return { content: [{ type: "text", text: result }] };
             }
             case "find_image": {
@@ -1345,10 +1407,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 const threshold = a.threshold !== undefined
                     ? Math.min(Math.max(requireFinite(a.threshold, "threshold"), 0), 1)
                     : 0.9;
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
                 const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
                 const result = hasRegion
-                    ? await findImage(path, threshold, requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"))
-                    : await findImage(path, threshold);
+                    ? await findImage(path, threshold, requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"), screen)
+                    : await findImage(path, threshold, undefined, undefined, undefined, undefined, screen);
                 return { content: [{ type: "text", text: result }] };
             }
             case "key_combo": {
@@ -1393,16 +1456,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 const timeoutMs = Math.min(a.timeoutMs !== undefined ? requireFinite(a.timeoutMs, "timeoutMs") : 5000, 120000);
                 const intervalMs = Math.max(a.intervalMs !== undefined ? requireFinite(a.intervalMs, "intervalMs") : 300, 50);
                 const tolerance = a.tolerance !== undefined ? requireInt(a.tolerance, "tolerance") : 10;
-                const result = await waitForPixel(x, y, String(a.color), timeoutMs, intervalMs, tolerance);
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
+                const result = await waitForPixel(x, y, String(a.color), timeoutMs, intervalMs, tolerance, screen);
                 return { content: [{ type: "text", text: result }] };
             }
             case "wait_for_text": {
                 const timeoutMs = Math.min(a.timeoutMs !== undefined ? requireFinite(a.timeoutMs, "timeoutMs") : 10000, 120000);
                 const intervalMs = Math.max(a.intervalMs !== undefined ? requireFinite(a.intervalMs, "intervalMs") : 600, 100);
+                const screen = a.screen !== undefined ? requireInt(a.screen, "screen") : undefined;
                 const hasRegion = a.x !== undefined && a.y !== undefined && a.width !== undefined && a.height !== undefined;
                 const result = hasRegion
-                    ? await waitForText(String(a.text), timeoutMs, intervalMs, requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"))
-                    : await waitForText(String(a.text), timeoutMs, intervalMs);
+                    ? await waitForText(String(a.text), timeoutMs, intervalMs, requireInt(a.x, "x"), requireInt(a.y, "y"), requireInt(a.width, "width"), requireInt(a.height, "height"), screen)
+                    : await waitForText(String(a.text), timeoutMs, intervalMs, undefined, undefined, undefined, undefined, screen);
                 return { content: [{ type: "text", text: result }] };
             }
             default:

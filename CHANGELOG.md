@@ -18,6 +18,15 @@ All notable changes to this project are documented here. The format is based on
 - `get_clipboard_image` / `set_clipboard_image`: read the clipboard image as a PNG, or put
   an image file on the clipboard for pasting into a remote app.
 - Middle mouse button support on `click` and `mouse_drag` (`button: "middle"`).
+- Screen-local coordinates everywhere: the `screen` parameter now works on
+  `screenshot_region`, `get_pixel_color`, `ocr`, `find_image`, `wait_for_pixel`, and
+  `wait_for_text` (it was already on the mouse tools). With `screen:N`, inputs are 0-based
+  from that monitor's top-left, and the tools that return coordinates (`ocr`, `find_image`,
+  `wait_for_text`) report screen-local boxes too — so a result feeds straight into
+  `click(screen:N)` with no virtual-desktop offsets.
+- `list_monitors` now includes an `index` field (the value to pass as `screen`).
+- `get_window_rect` now includes `Screen` (the monitor index the window is mostly on) and
+  `Device`, so callers can detect which monitor an app like Horizon is on and address it.
 - `screenshot_window`: capture a single window (the foreground one by default, or by
   PID/title), cropped to its DWM frame bounds.
 - `find_image`: locate a reference image on screen by pure-.NET pixel template-matching,
@@ -40,6 +49,9 @@ All notable changes to this project are documented here. The format is based on
   Troubleshooting section in the README.
 
 ### Changed
+- The `screen` index is documented as the OS enumeration order (from `list_monitors`'
+  `index`), **not** "0 = primary." Tool descriptions that implied the primary is index 0
+  were corrected — on some layouts a secondary monitor is index 0.
 - `ocr` line entries changed from plain strings to objects (`{text, x, y, width, height, words[]}`).
   The full recognized text is still available under the top-level `text` field.
 - `focus_window` now reliably raises a window past the Windows foreground lock —

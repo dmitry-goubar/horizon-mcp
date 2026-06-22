@@ -147,11 +147,13 @@ Moves the cursor to a pixel coordinate and clicks.
 | `x` | number | yes | Horizontal pixel coordinate |
 | `y` | number | yes | Vertical pixel coordinate |
 | `button` | string | no | `"left"` (default), `"right"`, or `"middle"` |
-| `screen` | number | no | Monitor index the coordinates are relative to — pass the **same index you gave `screenshot`** (see note below) |
+| `screen` | number | no | Monitor index (the `index` from [`list_monitors`](#list_monitors)) that `x,y` are local to — see note below |
 
 Returns: confirmation string `"Clicked (x, y)"`.
 
-> **Multi-monitor coordinates.** The cursor lives in the *virtual desktop*, where a monitor to the left of the primary starts at a **negative** X. But `screenshot screen=N` returns that monitor's image with a local `0,0` origin. So a point read off a screenshot of monitor N must be paired with `screen: N` on the click — the server then adds monitor N's virtual offset, and the click lands where the screenshot showed it. Omit `screen` only when `x,y` are already absolute virtual-desktop coordinates. The same `screen` parameter applies to `double_click`, `scroll`, `move_mouse`, and `mouse_drag`.
+> **Multi-monitor coordinates.** The desktop is one *virtual* coordinate space where a monitor to the left of the primary starts at a **negative** X. To avoid juggling those offsets, pass `screen: N` and give `x,y` as **0-based from that monitor's top-left** — the server adds the offset for you. The `screen` index is the `index` field from [`list_monitors`](#list_monitors) (it's the OS enumeration order, **not** necessarily primary-first, so the primary may not be `0`). To find which monitor an app like Horizon is on, call [`get_window_rect`](#get_window_rect) and read its `Screen` field, then pass that as `screen` everywhere.
+>
+> `screen` is accepted by every spatial tool: `click`, `double_click`, `scroll`, `move_mouse`, `mouse_drag`, `screenshot_region`, `get_pixel_color`, `ocr`, `find_image`, `wait_for_pixel`, and `wait_for_text`. For the tools that **return** coordinates (`ocr`, `find_image`, `wait_for_text`), passing `screen` makes the returned boxes screen-local too — so an `ocr(screen: N)` result feeds straight into `click(screen: N)`. Omit `screen` only when `x,y` are already absolute virtual-desktop coordinates.
 
 ---
 
@@ -235,13 +237,13 @@ Returns: JSON object `{ "Title": <string>, "Pid": <number> }`.
 
 ### `get_window_rect`
 
-Returns a window's screen rectangle. Pass a numeric PID or a partial window title. Use it to target clicks relative to a window, or to verify a `set_window_bounds` call.
+Returns a window's screen rectangle. Pass a numeric PID or a partial window title. Use it to target clicks relative to a window, to verify a `set_window_bounds` call, or to discover **which monitor** an app is on.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `target` | string | yes | Process ID (number) or partial window title |
 
-Returns: JSON object `{ "Title", "Pid", "Left", "Top", "Right", "Bottom", "Width", "Height" }`, or `"Window not found: …"`.
+Returns: JSON object `{ "Title", "Pid", "Left", "Top", "Right", "Bottom", "Width", "Height", "Screen", "Device" }`, or `"Window not found: …"`. `Screen` is the monitor index the window is mostly on — it matches [`list_monitors`](#list_monitors) and the `screen` parameter, so to drive an app on a secondary monitor (e.g. Horizon), look up its `Screen` here and pass that as `screen` to the spatial tools.
 
 ---
 
@@ -276,11 +278,11 @@ At least one of `x`/`y`/`width`/`height` is required. Coordinates are absolute s
 
 ### `list_monitors`
 
-Enumerates the connected monitors with their geometry and scaling. Use it to map a multi-monitor layout before capturing or clicking — secondary monitors can sit at negative coordinates.
+Enumerates the connected monitors with their geometry and scaling. Call it first to map a multi-monitor layout and learn which index is which — secondary monitors can sit at negative coordinates.
 
 No parameters.
 
-Returns: JSON array where each element is `{ "device", "primary", "x", "y", "width", "height", "dpi", "scale" }`. Coordinates are virtual-desktop pixels; `scale` is the percentage (`100` = no scaling, `150` = 150%).
+Returns: JSON array where each element is `{ "index", "device", "primary", "x", "y", "width", "height", "dpi", "scale" }`. **`index` is the value to pass as `screen`** on the other tools — it's the OS enumeration order, **not** necessarily primary-first, so the primary monitor may not be index `0`. `x,y` are the monitor's top-left in virtual-desktop pixels (a left-of-primary monitor has negative `x`); the monitor spans `x … x+width`. `scale` is the percentage (`100` = no scaling, `150` = 150%).
 
 ---
 
@@ -294,6 +296,7 @@ Captures a rectangular region of the screen and returns it as a PNG image. Use t
 | `y` | number | yes | Top edge pixel coordinate |
 | `width` | number | yes | Width in pixels |
 | `height` | number | yes | Height in pixels |
+| `screen` | number | no | Monitor index for `x,y` (see [`click`](#click)) |
 
 Returns: PNG image data (delivered as an MCP image content block).
 
@@ -319,6 +322,7 @@ Samples the color of a single screen pixel. Use to cheaply detect a notification
 |-----------|------|----------|-------------|
 | `x` | number | yes | Horizontal pixel coordinate |
 | `y` | number | yes | Vertical pixel coordinate |
+| `screen` | number | no | Monitor index for `x,y` (see [`click`](#click)) |
 
 Returns: JSON object `{ "R": <0-255>, "G": <0-255>, "B": <0-255>, "Hex": "#RRGGBB" }`.
 
@@ -390,10 +394,11 @@ Extracts text from the screen using the Windows built-in OCR engine — free, of
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `x` | number | no | Left edge of region (omit for full primary screen) |
+| `x` | number | no | Left edge of region (omit for full screen) |
 | `y` | number | no | Top edge of region |
 | `width` | number | no | Width of region in pixels |
 | `height` | number | no | Height of region in pixels |
+| `screen` | number | no | Monitor index to scan; makes inputs **and** returned boxes screen-local (see [`click`](#click)) |
 
 Returns: a JSON object
 
@@ -431,6 +436,7 @@ Locates a reference image (template) on screen by pixel template-matching — a 
 | `y` | number | no | Top edge of search region |
 | `width` | number | no | Width of search region in pixels |
 | `height` | number | no | Height of search region in pixels |
+| `screen` | number | no | Monitor index to search; makes the search region **and** returned coordinates screen-local (see [`click`](#click)) |
 
 Returns: JSON object `{ "found", "score", "x", "y", "width", "height", "centerX", "centerY" }` in absolute screen pixels — click `centerX`/`centerY` to hit the match. `score` is `0`–`1` (`1` = exact); `found` is true only if it meets the threshold. Restrict the search region for speed.
 
@@ -537,6 +543,7 @@ Polls a screen pixel until it matches a target color (within tolerance) or the t
 | `timeoutMs` | number | no | Max time to wait (default `5000`, max `120000`) |
 | `intervalMs` | number | no | Poll interval (default `300`) |
 | `tolerance` | number | no | Per-channel match tolerance 0–255 (default `10`) |
+| `screen` | number | no | Monitor index for `x,y` (see [`click`](#click)) |
 
 Returns: JSON object `{ "matched": <bool>, "color": <hex>, "elapsedMs": <number> }`.
 
@@ -551,10 +558,11 @@ Polls OCR until the given text appears on screen (case-insensitive substring) or
 | `text` | string | yes | Substring to wait for (case-insensitive) |
 | `timeoutMs` | number | no | Max time to wait (default `10000`, max `120000`) |
 | `intervalMs` | number | no | Poll interval (default `600`) |
-| `x` | number | no | Left edge of region (omit for full primary screen) |
+| `x` | number | no | Left edge of region (omit for full screen) |
 | `y` | number | no | Top edge of region |
 | `width` | number | no | Width of region in pixels |
 | `height` | number | no | Height of region in pixels |
+| `screen` | number | no | Monitor index to scan; makes the match's box screen-local (see [`click`](#click)) |
 
 Returns: JSON object `{ "matched": <bool>, "elapsedMs": <number>, "match": { "text", "x", "y", "width", "height" } | null }`.
 
